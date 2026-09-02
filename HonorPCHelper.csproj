@@ -22,5 +22,16 @@
 
   <ItemGroup>
     <PackageReference Include="System.Management" Version="10.0.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <EmbeddedResource Include="OSDIcons\*.png">
+      <LogicalName>HonorPCHelper.OSDIcons.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="OSDRuntime\*.dll">
+      <LogicalName>HonorPCHelper.Native.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
 </Project>

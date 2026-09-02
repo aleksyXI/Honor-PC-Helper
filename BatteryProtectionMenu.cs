@@ -1,11 +1,9 @@
 namespace HonorPCHelper;
-
 internal static class BatteryProtectionMenu
 {
     internal static void Build(NativePopupMenu menu)
     {
         var currentMode = HardwareSettings.BatteryProtection ?? BatteryProtectionMode.Home;
-
         menu.AddItem(
             L.T("Отключено", "Disabled", "关闭"),
             async () => await ApplyModeAsync(BatteryProtectionMode.Disabled),
@@ -40,7 +38,6 @@ internal static class BatteryProtectionMenu
                 "Charging stops at 100%.",
                 "充至 100% 停止充电。"));
     }
-
     private static Task ApplyModeAsync(BatteryProtectionMode mode)
         => HardwareCommand.ApplyAsync(
             () => PrivilegedHardware.TryRunBatteryTaskAsync(mode),

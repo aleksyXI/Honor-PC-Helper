@@ -1,32 +1,23 @@
 namespace HonorPCHelper;
-
 internal sealed class TouchpadBrightnessService : IDisposable
 {
     private const byte DirectionUp = 0x01;
     private const byte DirectionDown = 0x02;
     private const int RepeatSuppressMilliseconds = 150;
-    // Шаг запасного пути WmiSetBrightness: мельче прошивочных 10%,
-    // чтобы движение по краю тачпада меняло яркость плавно.
     private const int BrightnessStepPercent = 3;
-
     private readonly Action<string> _reportError;
     private readonly Lock _actionLock = new();
     private readonly Lock _lifecycleLock = new();
     private CancellationTokenSource _cancellation = new();
     private (byte Type, byte Direction, long Time) _lastGesture;
     private bool _disposed;
-
     internal TouchpadBrightnessService(Action<string> reportError)
     {
         _reportError = reportError;
     }
-
-    // Проверяет по интерфейсному пути устройства (WM_DEVICECHANGE), относится ли оно
-    // к поддерживаемым тачпадам, чтобы не перезапускать читателей на чужие устройства.
     internal static bool IsSupportedDevicePath(string devicePath)
         => TouchpadVendorLink.SupportedDevices.Any(device =>
             devicePath.Contains($"vid_{device.Vendor:x4}", StringComparison.OrdinalIgnoreCase));
-
     internal void Start()
     {
         lock (_lifecycleLock)
@@ -34,14 +25,9 @@ internal sealed class TouchpadBrightnessService : IDisposable
             if (_disposed)
                 return;
             if (!StartCore(_cancellation.Token))
-                _reportError(L.T("Совместимый тачпад Honor не найден.",
-                    "No compatible Honor touchpad was found.",
-                    "未找到兼容的荣耀触控板。"));
+                AppLog.Info("Touchpad HID not found — edge gestures disabled");
         }
     }
-
-    // Пересоздаёт читателей после подключения/отключения устройства
-    // (сон, переустановка драйвера тачпада): старые хендлы к этому моменту мертвы.
     internal void Restart()
     {
         lock (_lifecycleLock)
@@ -55,7 +41,6 @@ internal sealed class TouchpadBrightnessService : IDisposable
                 AppLog.Info("Touchpad readers restarted after device change");
         }
     }
-
     private bool StartCore(CancellationToken cancellation)
     {
         try
@@ -64,10 +49,8 @@ internal sealed class TouchpadBrightnessService : IDisposable
                 .Where(device => TouchpadVendorLink.SupportedDevices.Contains((device.VendorId, device.ProductId)))
                 .Where(device => device.UsagePage >= 0xFF00)
                 .ToArray();
-
             foreach (var device in candidates)
                 _ = ReadDevice(device, cancellation);
-
             return candidates.Length > 0;
         }
         catch (Exception exception)
@@ -79,7 +62,6 @@ internal sealed class TouchpadBrightnessService : IDisposable
             return false;
         }
     }
-
     public void Dispose()
     {
         lock (_lifecycleLock)
@@ -91,13 +73,11 @@ internal sealed class TouchpadBrightnessService : IDisposable
             _cancellation.Dispose();
         }
     }
-
     private async Task ReadDevice(HidDeviceInfo device, CancellationToken cancellation)
     {
         using var handle = device.OpenForReading();
         if (handle.IsInvalid)
             return;
-
         try
         {
             await using var stream = new FileStream(handle, FileAccess.Read,
@@ -118,18 +98,14 @@ internal sealed class TouchpadBrightnessService : IDisposable
         }
         catch (Exception exception)
         {
-            // Устройство пропало (сон, переустановка драйвера) - читатель завершается,
-            // WM_DEVICECHANGE перезапустит его при появлении устройства.
             AppLog.Error($"Touchpad reader stopped: {exception.Message}");
         }
     }
-
     private void ProcessGesture(byte type, byte direction)
     {
         if (type != TouchpadVendorLink.GestureEventCommand
             || direction is not (DirectionUp or DirectionDown))
             return;
-
         lock (_actionLock)
         {
             var now = Environment.TickCount64;
@@ -137,13 +113,9 @@ internal sealed class TouchpadBrightnessService : IDisposable
                 && now - _lastGesture.Time < RepeatSuppressMilliseconds)
                 return;
             _lastGesture = (type, direction, now);
-
             try
             {
                 var up = direction == DirectionUp;
-                // Порядок как у PC Manager: сначала ACPI-WMI Honor - шаг делает прошивка,
-                // Windows сама рисует штатный OSD. Запасной путь - WmiSetBrightness:
-                // яркость меняется, но OSD не будет.
                 if (!HonorAcpiBrightness.TryStep(up))
                     BrightnessController.Change(up ? BrightnessStepPercent : -BrightnessStepPercent);
             }

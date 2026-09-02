@@ -1,9 +1,4 @@
 namespace HonorPCHelper;
-
-/// <summary>
-/// Подменю трея «Клавиатура»: уровень подсветки, таймаут автоотключения
-/// и ночное расписание. Три группы разделены заголовками-разделителями.
-/// </summary>
 internal static class KeyboardBacklightMenu
 {
     private static readonly (KeyboardBacklightLevel Level, string Ru, string En, string Zh)[] Levels =
@@ -12,7 +7,6 @@ internal static class KeyboardBacklightMenu
         (KeyboardBacklightLevel.Low, "Слабая", "Weak", "弱"),
         (KeyboardBacklightLevel.High, "Сильная", "Strong", "强")
     ];
-
     private static readonly (ushort Seconds, string Ru, string En, string Zh)[] Timeouts =
     [
         (0, "Не выключать", "Never", "不关闭"),
@@ -21,7 +15,6 @@ internal static class KeyboardBacklightMenu
         (60, "1 минута", "1 minute", "1 分钟"),
         (300, "5 минут", "5 minutes", "5 分钟")
     ];
-
     internal static void Build(NativePopupMenu menu, BacklightScheduleService scheduleService)
     {
         AddHeader(menu, "Подсветка", "Backlight", "背光");
@@ -31,9 +24,7 @@ internal static class KeyboardBacklightMenu
                 L.T(ru, en, zh),
                 async () => await ApplyLevelAsync(value, scheduleService),
                 @checked: level == value);
-
         menu.AddSeparator();
-
         AddHeader(menu, "Таймаут", "Timeout", "超时");
         var timeout = HardwareSettings.KeyboardBacklightTimeout;
         foreach (var (seconds, ru, en, zh) in Timeouts)
@@ -41,16 +32,12 @@ internal static class KeyboardBacklightMenu
                 L.T(ru, en, zh),
                 async () => await ApplyTimeoutAsync(seconds),
                 @checked: timeout == seconds);
-
         menu.AddSeparator();
-
         AddHeader(menu, "Расписание", "Schedule", "计划");
         BuildScheduleItems(menu, scheduleService);
     }
-
     private static void AddHeader(NativePopupMenu menu, string russian, string english, string chinese)
         => menu.AddItem(L.T(russian, english, chinese), null, enabled: false);
-
     private static void BuildScheduleItems(NativePopupMenu menu, BacklightScheduleService scheduleService)
     {
         menu.AddItem(
@@ -61,7 +48,6 @@ internal static class KeyboardBacklightMenu
                 await scheduleService.SettingsChangedAsync();
             },
             @checked: HardwareSettings.BacklightScheduleEnabled);
-
         BuildHourSubMenu(
             menu.AddSubMenu(L.T("Включать в", "Turn on at", "开启时间")),
             HardwareSettings.BacklightOnHour,
@@ -72,14 +58,12 @@ internal static class KeyboardBacklightMenu
             HardwareSettings.BacklightOffHour,
             hour => HardwareSettings.BacklightOffHour = hour,
             scheduleService.SettingsChangedAsync);
-
         var levelSub = menu.AddSubMenu(L.T("Уровень по расписанию", "Scheduled level", "计划亮度"));
         var scheduleLevel = HardwareSettings.BacklightScheduleLevel;
         foreach (var (value, ru, en, zh) in Levels)
         {
             if (value == KeyboardBacklightLevel.Off)
                 continue;
-
             levelSub.AddItem(
                 L.T(ru, en, zh),
                 async () =>
@@ -90,7 +74,6 @@ internal static class KeyboardBacklightMenu
                 @checked: scheduleLevel == value);
         }
     }
-
     private static void BuildHourSubMenu(
         NativePopupMenu menu, int current, Action<int> save, Func<Task> settingsChanged)
     {
@@ -107,7 +90,6 @@ internal static class KeyboardBacklightMenu
                 @checked: hour == current);
         }
     }
-
     private static Task ApplyLevelAsync(
         KeyboardBacklightLevel level, BacklightScheduleService scheduleService)
         => HardwareCommand.ApplyAsync(
@@ -122,7 +104,6 @@ internal static class KeyboardBacklightMenu
                 HardwareSettings.KeyboardBacklight = level;
                 scheduleService.SetManualOverride();
             });
-
     private static Task ApplyTimeoutAsync(ushort seconds)
         => HardwareCommand.ApplyAsync(
             () => PrivilegedHardware.TryRunBacklightTimeoutTaskAsync(seconds),

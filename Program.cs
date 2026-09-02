@@ -4,6 +4,9 @@ namespace HonorPCHelper;
 
 internal static class Program
 {
+    /// <summary>OSD-показ из любого места; устанавливается HelperApplicationContext.</summary>
+    public static Action<string, string, string>? ShowOsd;
+
     /// <summary>
     /// Применяет одну аппаратную настройку. Возвращает false, если значение
     /// аргумента не разобрано; при отказе оборудования бросает исключение.
@@ -86,6 +89,7 @@ internal static class Program
 
     private static int RunTray()
     {
+        NativeLibraries.LoadAll();
         using var mutex = new Mutex(false, "HonorPCHelper.SingleInstance", out var createdNew);
         if (!createdNew)
             return 0;

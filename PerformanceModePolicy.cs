@@ -1,31 +1,22 @@
 namespace HonorPCHelper;
-
 internal static class PerformanceModePolicy
 {
     internal static bool CanEnable(out string reason)
     {
         var status = SystemInformation.PowerStatus;
+        const string ru = "Компьютер должен быть подключен к источнику питания и заряд аккумулятора больше 20 процентов";
         if (status.PowerLineStatus != PowerLineStatus.Online)
         {
-            reason = L.T(
-                "Производительный режим доступен только при подключённом источнике питания.",
-                "Performance mode is available only when AC power is connected.",
-                "仅在连接电源适配器时可使用高性能模式。");
+            reason = L.T(ru, "The computer must be connected to a power source and the battery charge must be above 20 percent", "电脑必须连接电源，且电池电量高于20%");
             return false;
         }
-
         if (status.BatteryLifePercent >= 0 && status.BatteryLifePercent < 0.20f)
         {
-            reason = L.T(
-                "Для производительного режима заряд батареи должен быть не менее 20%.",
-                "Performance mode requires at least 20% battery charge.",
-                "高性能模式要求电池电量不低于 20%。");
+            reason = L.T(ru, "The computer must be connected to a power source and the battery charge must be above 20 percent", "电脑必须连接电源，且电池电量高于20%");
             return false;
         }
-
         if (status.BatteryLifePercent < 0)
             AppLog.Info("Battery charge is unknown; performance mode allowed because AC power is connected");
-
         reason = string.Empty;
         return true;
     }

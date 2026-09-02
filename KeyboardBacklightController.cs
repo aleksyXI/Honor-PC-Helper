@@ -1,12 +1,10 @@
 namespace HonorPCHelper;
-
 internal enum KeyboardBacklightLevel
 {
     Off,
     Low,
     High
 }
-
 internal sealed class KeyboardBacklightController
 {
     private const ulong SetModeCommand = 0x00001406;
@@ -16,7 +14,6 @@ internal sealed class KeyboardBacklightController
     private const byte ModeLow = 0x03;
     private const byte ModeHigh = 0x04;
     private const byte ModeAuto = 0x10;
-
     internal void SetLevel(KeyboardBacklightLevel level)
     {
         var mode = level switch
@@ -26,7 +23,6 @@ internal sealed class KeyboardBacklightController
             KeyboardBacklightLevel.High => ModeHigh,
             _ => throw new ArgumentOutOfRangeException(nameof(level))
         };
-
         using var session = new HonorWmiSession();
         try
         {
@@ -46,7 +42,6 @@ internal sealed class KeyboardBacklightController
             session.Call(SetAutoLevelCommand | ((ulong)brightness << 16));
         }
     }
-
     internal void SetTimeout(ushort seconds)
     {
         HonorWmi.Call(SetTimeoutCommand | ((ulong)seconds << 16));

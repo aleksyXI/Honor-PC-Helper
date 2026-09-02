@@ -1,5 +1,4 @@
 namespace HonorPCHelper;
-
 internal readonly record struct HardwareSensorSnapshot(
     DateTime SampledAt,
     int? Fan1Rpm,
@@ -11,18 +10,15 @@ internal readonly record struct HardwareSensorSnapshot(
     int? ChargeEnd)
 {
     internal bool IsFresh => DateTime.UtcNow - SampledAt < TimeSpan.FromSeconds(30);
-
     internal string Serialize(string requestId)
         => string.Join('|', requestId, SampledAt.Ticks, Fan1Rpm, Fan2Rpm, CpuTemperature,
             BatteryTemperature, KeyboardBacklightMode, ChargeStart, ChargeEnd);
-
     internal static bool TryParse(string? value, out HardwareSensorSnapshot snapshot)
     {
         snapshot = default;
         var parts = value?.Split('|');
         if (parts is not { Length: 9 } || !long.TryParse(parts[1], out var ticks))
             return false;
-
         snapshot = new HardwareSensorSnapshot(
             new DateTime(ticks, DateTimeKind.Utc),
             ParseNullable(parts[2]), ParseNullable(parts[3]), ParseNullable(parts[4]),
@@ -30,18 +26,15 @@ internal readonly record struct HardwareSensorSnapshot(
             ParseNullable(parts[8]));
         return true;
     }
-
     private static int? ParseNullable(string value)
         => int.TryParse(value, out var result) ? result : null;
 }
-
 internal static class HardwareSensorController
 {
     private const ulong FanSpeedGetCommand = 0x00000802;
     private const ulong TemperatureGetCommand = 0x00000202;
     private const ulong KeyboardBacklightModeGetCommand = 0x00001306;
     private const ulong BatteryThresholdsGetCommand = 0x00001103;
-
     internal static void ReadAndStore(string requestId)
     {
         using var session = new HonorWmiSession();
@@ -52,7 +45,6 @@ internal static class HardwareSensorController
             ReadTemperature(session, 0x00), ReadTemperature(session, 0x0E),
             backlightMode, chargeStart, chargeEnd);
         HardwareSettings.SensorSnapshot = snapshot.Serialize(requestId);
-
         HardwareSettings.KeyboardBacklight = backlightMode switch
         {
             0x02 => KeyboardBacklightLevel.Off,
@@ -64,7 +56,6 @@ internal static class HardwareSensorController
             BatteryProtectionController.FromThresholds(chargeStart, chargeEnd)
             ?? HardwareSettings.BatteryProtection;
     }
-
     private static int? ReadFan(HonorWmiSession session, byte index)
     {
         try
@@ -78,7 +69,6 @@ internal static class HardwareSensorController
             return null;
         }
     }
-
     private static int? ReadTemperature(HonorWmiSession session, byte zone)
     {
         try
@@ -92,8 +82,6 @@ internal static class HardwareSensorController
             return null;
         }
     }
-
-    // Both charge thresholds come back in a single response, so read them together.
     private static (int? Start, int? End) ReadBatteryThresholds(HonorWmiSession session)
     {
         try
@@ -109,7 +97,6 @@ internal static class HardwareSensorController
             return (null, null);
         }
     }
-
     private static int? ReadValue(HonorWmiSession session, ulong command, int offset, string name)
     {
         try

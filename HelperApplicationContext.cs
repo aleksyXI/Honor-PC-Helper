@@ -1,14 +1,11 @@
 namespace HonorPCHelper;
-
 internal sealed class HelperApplicationContext : ApplicationContext
 {
     private const int SensorRefreshIntervalMilliseconds = 5_000;
-    // Мышь над иконкой трея генерирует поток событий, а сборка подсказки читает
-    // реестр и WMI - поэтому обновление ограничено по частоте.
     private const int TooltipMinIntervalMilliseconds = 750;
-
     private readonly MessageWindow _window;
     private readonly Control _uiDispatcher;
+    private readonly OSDToast? _osdToast;
     private readonly NotifyIcon _notifyIcon;
     private readonly System.Windows.Forms.Timer _trayHoverTimer;
     private readonly IntPtr _tooltipHandle;
@@ -21,9 +18,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private bool _tooltipAdded;
     private bool _disposed;
     private int _sensorRefreshInProgress;
-    // Отрицательные значения, чтобы вскоре после загрузки системы, когда
-    // TickCount64 ещё мал, первый опрос датчиков и первое пробуждение экрана
-    // не попадали под свои же интервалы подавления.
     private long _lastSensorRefresh = -SensorRefreshIntervalMilliseconds;
     private long _suppressBacklightEventsUntil;
     private long _lastResumeRestore = -ResumeDebounceMilliseconds;
@@ -36,7 +30,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private const int ResumeSettleMilliseconds = 8000;
     private const int ResumeDebounceMilliseconds = 10000;
     private readonly Task<IReadOnlyList<DriverComponent>> _driverComponentsTask;
-
     internal HelperApplicationContext()
     {
         _window = new MessageWindow(OnMenuTooltip, OnDisplayResume, OnHidDeviceChange);
@@ -61,9 +54,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
         // прошивкой, успеют его перезаписать.
         HardwareSettings.SeedPreferredBatteryProtection();
         _trayIcon = TrayIconFactory.Create(HardwareSettings.PerformanceModeActive);
-        // Подсказка обращается к WMI, поэтому при старте показывается название
-        // приложения, а настоящий текст подставляется первым же обновлением:
-        // значок в трее не должен ждать опроса датчиков.
         _tooltipCache = "Honor PC Helper";
         _lastTooltipUpdate = 0;
         _notifyIcon = new NotifyIcon
@@ -81,15 +71,17 @@ internal sealed class HelperApplicationContext : ApplicationContext
         _trayHoverTimer.Tick += OnTrayHoverTimerTick;
         _deviceChangeTimer = new System.Windows.Forms.Timer { Interval = 1_000 };
         _deviceChangeTimer.Tick += OnDeviceChangeTimerTick;
-
         _touchpadService = new TouchpadBrightnessService(ShowError);
         _hidNotification = NativeMethods.RegisterHidDeviceNotification(_window.Handle);
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnSystemPowerModeChanged;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
         _displayNotification = NativeMethods.RegisterPowerSettingNotification(
             _window.Handle, NativeMethods.GuidConsoleDisplayState, NativeMethods.DeviceNotifyWindowHandle);
-
+        _osdToast = new OSDToast();
+        Program.ShowOsd = (icon, emoji, text) => _osdToast?.Show(icon, emoji, text);
         _backlightSchedule.Start();
+        PowerPlanHelper.SyncWithMode(HardwareSettings.PerformanceModeActive);
+        AppLog.Info($"Power plan synced with mode: performance={HardwareSettings.PerformanceModeActive}");
         _driverComponentsTask = new DriverUpdateService().BuildDeviceListAsync();
         _ = _driverComponentsTask.ContinueWith(
             task => AppLog.Error("Background driver device inventory failed", task.Exception!),
@@ -100,7 +92,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
     }
 
     /// <summary>
-    /// Всё, что обращается к WMI и HID, поднимается в фоне: перечисление
+    /// Всё, что обращается к WMI, HID и CCD, поднимается в фоне: перечисление
     /// HID-устройств и подключение к root\wmi занимают сотни миллисекунд,
     /// а значок в трее должен появляться сразу после запуска.
     /// </summary>
@@ -108,25 +100,23 @@ internal sealed class HelperApplicationContext : ApplicationContext
     {
         if (_disposed)
             return;
-
         _touchpadService.Start();
-        // Меню трея спрашивает о наличии тачпада при каждом открытии - пусть
-        // ответ уже лежит в кэше к тому моменту, как пользователь щёлкнет значок.
         TouchpadHapticsController.IsSupported();
-        // Уровень вибрации и жесты краёв живут в прошивке тачпада
-        // и сбрасываются при перезагрузке.
         TouchpadHapticsController.Reapply();
         TouchpadGesturesController.Reapply();
-
         try
         {
             var events = new PowerModeEventService(
                 HandlePowerModeChanged,
                 HandleKeyboardBacklightChanged,
-                ShouldIgnoreBacklightEvent);
+                ShouldIgnoreBacklightEvent,
+                HandleCameraChanged,
+                HandleMicChanged,
+                HandleScreenshot,
+                HandleTouchpadChanged,
+                HandleHonorApp);
             events.Start();
             _powerModeEvents = events;
-            // Приложение могло закрыться, пока служба поднималась.
             if (_disposed)
             {
                 events.Dispose();
@@ -141,10 +131,12 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 $"Failed to monitor Fn+P: {exception.Message}",
                 $"无法监听 Fn+P：{exception.Message}"));
         }
-
+        ScreenControl.Restore();
+        if (HardwareSettings.ClamshellMode)
+            ClamshellControl.Enable();
+        StopHonorServices();
         _ = RefreshSensorsAsync();
     }
-
     protected override void Dispose(bool disposing)
     {
         if (disposing)
@@ -152,6 +144,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _disposed = true;
             _touchpadService.Dispose();
             _powerModeEvents?.Dispose();
+            _osdToast?.Dispose();
             _backlightSchedule.Dispose();
             _batteryProtection.Dispose();
             HideNativeTooltip();
@@ -178,25 +171,21 @@ internal sealed class HelperApplicationContext : ApplicationContext
         }
         base.Dispose(disposing);
     }
-
     private NativePopupMenu CreateMenu()
     {
         var menu = new NativePopupMenu();
-
         var batterySub = menu.AddSubMenu(
             L.T("Ограничение заряда", "Charge limit", "充电限制"),
             L.T("Ограничение диапазона заряда для продления срока службы батареи.",
                 "Limit the charge range to extend battery lifespan.",
                 "限制充电区间，延长电池寿命。"));
         BatteryProtectionMenu.Build(batterySub);
-
         var backlightSub = menu.AddSubMenu(
             L.T("Клавиатура", "Keyboard", "键盘"),
             L.T("Уровень подсветки, таймаут и автоматическое расписание.",
                 "Backlight level, timeout and automatic schedule.",
                 "背光亮度、超时时间和自动计划。"));
         KeyboardBacklightMenu.Build(backlightSub, _backlightSchedule);
-
         if (TouchpadHapticsController.IsSupported())
         {
             var touchpadSub = menu.AddSubMenu(
@@ -206,6 +195,34 @@ internal sealed class HelperApplicationContext : ApplicationContext
                     "振动反馈强度和触控板边缘手势。"));
             TouchpadMenu.Build(touchpadSub);
         }
+        var rateSub = menu.AddSubMenu(
+            L.T("Частота экрана", "Screen refresh rate", "屏幕刷新率"),
+            L.T("Частота обновления дисплея (макс. на сети, 60 Гц от батареи).",
+                "Display refresh rate (max on AC, 60 Hz on battery).",
+                "显示器刷新率（电源时最高，电池时 60Hz）。"));
+        int maxRate = ScreenControl.GetMaxRate();
+        int currentRate = ScreenControl.GetCurrentRate();
+        if (maxRate > 60)
+        {
+            rateSub.AddItem($"{maxRate} Гц", () => ScreenControl.SetRate(maxRate),
+                @checked: currentRate == maxRate);
+            rateSub.AddItem("60 Гц", () => ScreenControl.SetRate(60),
+                @checked: currentRate == 60);
+        }
+        else
+        {
+            rateSub.AddItem("60 Гц", () => ScreenControl.SetRate(60),
+                @checked: currentRate == 60);
+        }
+        rateSub.AddItem(
+            L.T("Авто: макс на сети / 60 от батареи", "Auto: max on AC / 60 on battery", "自动：电源最高/电池60"),
+            () => ScreenControl.SetAuto(!ScreenControl.IsAuto()),
+            @checked: ScreenControl.IsAuto());
+
+        menu.AddItem(
+            L.T("Clamshell: работать с закрытой крышкой", "Clamshell mode: work with lid closed", "合盖模式：合盖继续工作"),
+            () => SetClamshell(!HardwareSettings.ClamshellMode),
+            @checked: HardwareSettings.ClamshellMode);
 
         PowerUnlockMenu.Build(menu, UpdateTrayIcon);
 
@@ -218,14 +235,15 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 "从 HONOR 检查并安装驱动程序和固件。"));
         menu.AddSeparator();
         menu.AddItem(
+            L.T("Остановить все службы HONOR", "Stop all HONOR services", "停止所有荣耀服务"),
+            StopHonorServices);
+        menu.AddItem(
             L.T("Запускать вместе с Windows", "Start with Windows", "开机自启动"),
             ToggleStartup,
             @checked: StartupManager.IsEnabled);
         menu.AddItem(L.T("Выход", "Exit", "退出"), ExitThread);
-
         return menu;
     }
-
     private void ShowDriverManager()
     {
         var form = Application.OpenForms.OfType<DriverManagerForm>().FirstOrDefault();
@@ -244,6 +262,63 @@ internal sealed class HelperApplicationContext : ApplicationContext
         }
     }
 
+    private void SetClamshell(bool enabled)
+    {
+        if (enabled && !ScreenNative.IsExternalDisplayConnected())
+        {
+            _osdToast?.Show("imageIcon", "🖥️",
+                L.T("Невозможно включить clamshell-режим", "Cannot enable clamshell mode", "无法开启合盖模式"),
+                L.T("Подключите внешний монитор", "Connect an external monitor", "请连接外接显示器"));
+            return;
+        }
+        HardwareSettings.ClamshellMode = enabled;
+        try
+        {
+            if (enabled) ClamshellControl.Enable();
+            else ClamshellControl.Disable();
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Clamshell toggle failed", exception);
+        }
+    }
+
+    private void StopHonorServices()
+    {
+        try
+        {
+            var services = new[] { "OSDServer", "MBAMainService", "HnUpdateService" };
+            foreach (var name in services)
+            {
+                try
+                {
+                    using var sc = new System.ServiceProcess.ServiceController(name);
+                    if (sc.Status != System.ServiceProcess.ServiceControllerStatus.Stopped)
+                        sc.Stop();
+                    sc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(10));
+                    AppLog.Info($"Service stopped: {name}");
+                }
+                catch (Exception ex) { AppLog.Info($"Service {name}: {ex.Message}"); }
+            }
+            foreach (var p in System.Diagnostics.Process.GetProcesses())
+            {
+                try
+                {
+                    var path = p.MainModule?.FileName ?? "";
+                    if (path.StartsWith(@"C:\Program Files\HONOR\", StringComparison.OrdinalIgnoreCase))
+                    {
+                        p.Kill();
+                        AppLog.Info($"Process killed: {p.ProcessName}");
+                    }
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLog.Error("StopHonorServices failed", ex);
+        }
+    }
     private void ToggleStartup()
     {
         try
@@ -259,35 +334,43 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 "Honor PC Helper", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
-
     private void ShowError(string message)
     {
         if (_disposed)
             return;
-
         AppLog.Error(message);
+        try
+        {
+            _uiDispatcher.BeginInvoke(() => _osdToast?.Show(
+                "performance", "⚠️",
+                L.T("Сбой включения производительного режима", "Failed to enable performance mode", "无法开启高性能模式"),
+                message));
+        }
+        catch { }
     }
-
     private async void ApplyPowerModeChange(bool enabled)
     {
         if (_disposed)
             return;
-
         if (enabled && !PerformanceModePolicy.CanEnable(out var reason))
         {
             await DisablePerformanceModeAsync();
             ShowError(reason);
             return;
         }
-
+        PowerPlanHelper.SyncWithMode(enabled);
+        _osdToast?.Show(
+            enabled ? "performance" : "intelligence",
+            enabled ? "⚡" : "🛡️",
+            enabled
+                ? L.T("Производительный режим", "Performance mode", "性能模式")
+                : L.T("Умный режим", "Smart mode", "智能模式"));
         UpdateTrayIcon();
     }
-
     private void HandlePowerModeChanged(bool enabled)
     {
         if (_disposed || _uiDispatcher.IsDisposed || _tooltipHandle == IntPtr.Zero)
             return;
-
         try
         {
             _uiDispatcher.BeginInvoke(() => ApplyPowerModeChange(enabled));
@@ -296,46 +379,114 @@ internal sealed class HelperApplicationContext : ApplicationContext
         {
         }
     }
-
+    private void HandleCameraChanged(bool enabled)
+    {
+        if (_disposed || _uiDispatcher.IsDisposed || _osdToast is null)
+            return;
+        try
+        {
+            CameraControl.SetCamera(enabled);
+            _uiDispatcher.BeginInvoke(() =>
+                _osdToast.Show(enabled ? "OnCamera" : "OffCamera", "📷", enabled
+                    ? L.T("Камера включена", "Camera On", "摄像头已开启")
+                    : L.T("Камера выключена", "Camera Off", "摄像头已关闭")));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+    private void HandleMicChanged(bool enabled)
+    {
+        if (_disposed || _uiDispatcher.IsDisposed || _osdToast is null)
+            return;
+        try
+        {
+            _uiDispatcher.BeginInvoke(() =>
+            {
+                try
+                {
+                    MicControl.SetMicMute(!enabled);
+                    MicControl.SetLight(!enabled);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Mic mute failed", ex);
+                }
+                _osdToast.Show(enabled ? "OnMic" : "EnMic", enabled ? "🎙️" : "🔇", enabled
+                    ? L.T("Микрофон включен", "Microphone On", "麦克风已开启")
+                    : L.T("Микрофон выключен", "Microphone Off", "麦克风已关闭"));
+            });
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+    private void HandleScreenshot()
+    {
+        try
+        {
+            InputSimulator.PressPrintScreen();
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Screenshot key emulation failed", exception);
+        }
+    }
+    private void HandleTouchpadChanged(bool enabled)
+    {
+        if (_disposed || _uiDispatcher.IsDisposed || _osdToast is null)
+            return;
+        try
+        {
+            _uiDispatcher.BeginInvoke(() =>
+                _osdToast.Show(enabled ? "OnTouch" : "EnTouch", "🖱️", enabled
+                    ? L.T("Тачпад включен", "Touchpad on", "触控板已开启")
+                    : L.T("Тачпад выключен", "Touchpad off", "触控板已关闭")));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+    private void HandleHonorApp()
+    {
+        if (_disposed || _uiDispatcher.IsDisposed || _osdToast is null)
+            return;
+        try
+        {
+            _uiDispatcher.BeginInvoke(() =>
+                _osdToast.Show("imageIcon", "🔧", L.T("Honor PC Helper", "Honor PC Helper", "荣耀电脑管家")));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
     private bool ShouldIgnoreBacklightEvent()
         => Environment.TickCount64 < Interlocked.Read(ref _suppressBacklightEventsUntil);
-
-    // Вызывается из WndProc (UI-поток) при подключении/отключении HID-устройства.
-    // Дебаунс таймером: система шлёт пачку событий на одно физическое подключение.
     private void OnHidDeviceChange(string devicePath)
     {
         if (_disposed || !TouchpadBrightnessService.IsSupportedDevicePath(devicePath))
             return;
-
         _deviceChangeTimer.Stop();
         _deviceChangeTimer.Start();
     }
-
     private void OnDeviceChangeTimerTick(object? sender, EventArgs eventArgs)
     {
         _deviceChangeTimer.Stop();
         if (_disposed)
             return;
-
         // Путь устройства, найденный до переподключения, больше не действителен.
         TouchpadVendorLink.InvalidateCache();
         _touchpadService.Restart();
-        // Прошивка тачпада забывает свои настройки при переподключении.
         TouchpadHapticsController.Reapply();
         TouchpadGesturesController.Reapply();
     }
-
-    // On modern standby (S0) systems the classic Resume power event is unreliable;
-    // the display turning back on is the dependable wake signal.
     private void OnDisplayResume()
     {
         if (_disposed)
             return;
-
         var now = Environment.TickCount64;
         if (now - Interlocked.Read(ref _lastResumeRestore) < ResumeDebounceMilliseconds)
             return;
-
         Interlocked.Exchange(ref _lastResumeRestore, now);
         Interlocked.Exchange(ref _suppressBacklightEventsUntil, now + ResumeSettleMilliseconds);
         AppLog.Info("Display turned on, restoring keyboard backlight");
@@ -344,30 +495,40 @@ internal sealed class HelperApplicationContext : ApplicationContext
         TouchpadHapticsController.Reapply();
         TouchpadGesturesController.Reapply();
     }
-
     private void HandleKeyboardBacklightChanged(KeyboardBacklightLevel level)
     {
         if (_disposed || _uiDispatcher.IsDisposed)
             return;
-
         try
         {
             _uiDispatcher.BeginInvoke(() =>
             {
                 HardwareSettings.KeyboardBacklight = level;
                 _backlightSchedule.SetManualOverride();
+                _osdToast?.Show(
+                    level switch
+                    {
+                        KeyboardBacklightLevel.Off => "OffLevel",
+                        KeyboardBacklightLevel.Low => "LowLevel",
+                        _ => "HighLevel"
+                    },
+                    "⌨️",
+                    level switch
+                    {
+                        KeyboardBacklightLevel.Off => L.T("Подсветка выключена", "Backlight off", "背光已关闭"),
+                        KeyboardBacklightLevel.Low => L.T("Подсветка: низкий уровень", "Backlight low", "低亮度背光"),
+                        _ => L.T("Подсветка: высокий уровень", "Backlight high", "高亮度背光")
+                    });
             });
         }
         catch (InvalidOperationException)
         {
         }
     }
-
     private void OnTrayIconMouseMove(object? sender, MouseEventArgs eventArgs)
     {
         if (_disposed)
             return;
-
         try
         {
             _lastTrayMousePosition = Control.MousePosition;
@@ -381,7 +542,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
             AppLog.Error("Tray tooltip update failed", exception);
         }
     }
-
     private void OnTrayHoverTimerTick(object? sender, EventArgs eventArgs)
     {
         if (_disposed || Control.MousePosition != _lastTrayMousePosition)
@@ -389,45 +549,33 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _trayHoverTimer.Stop();
             return;
         }
-
         UpdateTrayTooltip();
         _ = RefreshSensorsAsync();
     }
-
-    /// <summary>
-    /// Пересобирает подсказку не чаще, чем раз в <see cref="TooltipMinIntervalMilliseconds"/>,
-    /// и обращается к оболочке только когда текст действительно изменился.
-    /// </summary>
     private void UpdateTrayTooltip(bool force = false)
     {
         if (_disposed)
             return;
-
         var now = Environment.TickCount64;
         if (!force && now - _lastTooltipUpdate < TooltipMinIntervalMilliseconds)
             return;
-
         _lastTooltipUpdate = now;
         var text = DiagnosticsService.BuildCompactToolTip();
         if (text == _tooltipCache)
             return;
-
         _tooltipCache = text;
         _notifyIcon.Text = text;
     }
-
     private async Task RefreshSensorsAsync()
     {
         if (_disposed || Environment.TickCount64 - Interlocked.Read(ref _lastSensorRefresh) < SensorRefreshIntervalMilliseconds
             || Interlocked.Exchange(ref _sensorRefreshInProgress, 1) != 0)
             return;
-
         Interlocked.Exchange(ref _lastSensorRefresh, Environment.TickCount64);
         try
         {
             if (!await PrivilegedHardware.TryReadSensorsTaskAsync() || _disposed || _uiDispatcher.IsDisposed)
                 return;
-
             _uiDispatcher.BeginInvoke(() => UpdateTrayTooltip(force: true));
         }
         catch (Exception exception)
@@ -439,35 +587,29 @@ internal sealed class HelperApplicationContext : ApplicationContext
             Interlocked.Exchange(ref _sensorRefreshInProgress, 0);
         }
     }
-
     private void OnTrayIconMouseClick(object? sender, MouseEventArgs eventArgs)
     {
         if (_disposed)
             return;
-
         if (eventArgs.Button == MouseButtons.Right)
         {
-            Action? action;
             using var menu = CreateMenu();
             var commandId = menu.Show(_window.Handle);
             HideNativeTooltip();
-            action = menu.GetCallback(commandId);
+            var action = menu.GetCallback(commandId);
             if (action is not null)
                 _uiDispatcher.BeginInvoke(action);
         }
     }
-
     private void OnMenuTooltip(string? text)
     {
         if (_disposed || _uiDispatcher.IsDisposed)
             return;
-
         if (text == null)
         {
             HideNativeTooltip();
             return;
         }
-
         var mousePos = Control.MousePosition;
         var textPtr = System.Runtime.InteropServices.Marshal.StringToHGlobalUni(text);
         var previousText = _tooltipText;
@@ -493,12 +635,10 @@ internal sealed class HelperApplicationContext : ApplicationContext
         if (previousText != IntPtr.Zero)
             System.Runtime.InteropServices.Marshal.FreeHGlobal(previousText);
     }
-
     private void HideNativeTooltip()
     {
         if (_tooltipHandle == IntPtr.Zero || !_tooltipAdded)
             return;
-
         var ti = new NativeMethods.ToolInfo
         {
             Size = (uint)System.Runtime.InteropServices.Marshal.SizeOf<NativeMethods.ToolInfo>(),
@@ -516,12 +656,10 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _tooltipText = IntPtr.Zero;
         }
     }
-
     private void OnUserPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs eventArgs)
     {
         if (_disposed || _uiDispatcher.IsDisposed)
             return;
-
         try
         {
             _uiDispatcher.BeginInvoke(UpdateTheme);
@@ -530,19 +668,15 @@ internal sealed class HelperApplicationContext : ApplicationContext
         {
         }
     }
-
     private void UpdateTheme() => UpdateTrayIcon();
-
     private void UpdateTrayIcon()
     {
         var icon = TrayIconFactory.Create(HardwareSettings.PerformanceModeActive);
         if (ReferenceEquals(icon, _trayIcon))
             return;
-
         _trayIcon = icon;
         _notifyIcon.Icon = icon;
     }
-
     private async void OnSystemPowerModeChanged(object sender, Microsoft.Win32.PowerModeChangedEventArgs eventArgs)
     {
         if (eventArgs.Mode == Microsoft.Win32.PowerModes.Suspend)
@@ -550,15 +684,18 @@ internal sealed class HelperApplicationContext : ApplicationContext
             await DisablePerformanceModeAsync();
             return;
         }
-
-        if (eventArgs.Mode == Microsoft.Win32.PowerModes.StatusChange
-            && HardwareSettings.PerformanceModeActive
-            && !PerformanceModePolicy.CanEnable(out _))
+        if (eventArgs.Mode is Microsoft.Win32.PowerModes.Resume or Microsoft.Win32.PowerModes.StatusChange)
         {
-            await DisablePerformanceModeAsync();
-            return;
+            ScreenControl.Restore();
         }
-
+        if (eventArgs.Mode == Microsoft.Win32.PowerModes.StatusChange)
+        {
+            if (HardwareSettings.PerformanceModeActive && !PerformanceModePolicy.CanEnable(out _))
+            {
+                await DisablePerformanceModeAsync();
+                return;
+            }
+        }
         if (eventArgs.Mode == Microsoft.Win32.PowerModes.Resume)
         {
             HardwareSettings.PowerUnlock = false;
@@ -569,26 +706,22 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _ = _batteryProtection.RestoreAfterResumeAsync();
         }
     }
-
     private async Task DisablePerformanceModeAsync()
     {
         if (!HardwareSettings.PerformanceModeActive)
             return;
-
         if (!await PrivilegedHardware.TryRunPowerUnlockTaskAsync(false))
             return;
         HardwareSettings.PowerUnlock = false;
         HardwareSettings.PerformanceModeActive = false;
         HandlePowerModeChanged(false);
     }
-
     private sealed class MessageWindow : NativeWindow
     {
         private const int WmMenuSelect = 0x011F;
         private readonly Action<string?> _onTooltip;
         private readonly Action _onDisplayResume;
         private readonly Action<string> _onDeviceChange;
-
         internal MessageWindow(Action<string?> onTooltip,
             Action onDisplayResume, Action<string> onDeviceChange)
         {
@@ -597,7 +730,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _onDeviceChange = onDeviceChange;
             CreateHandle(new CreateParams());
         }
-
         protected override void WndProc(ref Message message)
         {
             if (message.Msg == NativeMethods.WmPowerBroadcast
@@ -641,5 +773,4 @@ internal sealed class HelperApplicationContext : ApplicationContext
             base.WndProc(ref message);
         }
     }
-
 }
