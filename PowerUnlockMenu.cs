@@ -1,4 +1,5 @@
 namespace HonorPCHelper;
+
 internal static class PowerUnlockMenu
 {
     internal static void Build(NativePopupMenu menu, Action modeChanged)
@@ -12,6 +13,7 @@ internal static class PowerUnlockMenu
                 "Checked: performance mode. Unchecked: smart mode. Fn+P also switches modes.",
                 "勾选：高性能模式。取消勾选：智能模式。也可用 Fn+P 切换。"));
     }
+
     private static Task ApplyModeAsync(Action modeChanged)
     {
         var target = !HardwareSettings.PerformanceModeActive;
@@ -20,6 +22,7 @@ internal static class PowerUnlockMenu
             MessageBox.Show(reason, "Honor PC Helper", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return Task.CompletedTask;
         }
+
         return HardwareCommand.ApplyAsync(
             () => PrivilegedHardware.TryRunPowerUnlockTaskAsync(target),
             "--set-power-unlock",
