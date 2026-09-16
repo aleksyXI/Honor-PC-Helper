@@ -123,6 +123,18 @@ internal static class PrivilegedHardware
     internal static bool TryRunPowerUnlockTask(bool enabled)
         => TryRunTask("--apply-power-unlock", enabled.ToString());
 
+    internal static bool TryRunCameraTask(bool enabled)
+        => TryRunTask("--apply-camera", enabled.ToString());
+
+    internal static bool TryRunClamshellTask(bool enabled)
+        => TryRunTask("--apply-clamshell", enabled.ToString());
+
+    internal static bool TryRunPowerPlanTask(bool performance)
+        => TryRunTask("--apply-power-plan", performance.ToString());
+
+    internal static bool TryRunStopServicesTask()
+        => TryRunTask("--apply-stop-services", "1");
+
     internal static bool TryRunGrantBrightnessAccessTask()
         => TryRunTask("--grant-brightness-access", "1");
 
@@ -137,6 +149,18 @@ internal static class PrivilegedHardware
 
     internal static Task<bool> TryRunPowerUnlockTaskAsync(bool enabled)
         => Task.Run(() => TryRunPowerUnlockTask(enabled));
+
+    internal static Task<bool> TryRunCameraTaskAsync(bool enabled)
+        => Task.Run(() => TryRunCameraTask(enabled));
+
+    internal static Task<bool> TryRunClamshellTaskAsync(bool enabled)
+        => Task.Run(() => TryRunClamshellTask(enabled));
+
+    internal static Task<bool> TryRunPowerPlanTaskAsync(bool performance)
+        => Task.Run(() => TryRunPowerPlanTask(performance));
+
+    internal static Task<bool> TryRunStopServicesTaskAsync()
+        => Task.Run(TryRunStopServicesTask);
 
     internal static Task<bool> TryReadSensorsTaskAsync()
         => Task.Run(() => TryReadSensorsTask(allowElevation: true));
@@ -216,6 +240,20 @@ internal static class PrivilegedHardware
             else if (parts[0] == "--apply-power-unlock"
                 && bool.TryParse(parts[1], out var enabled))
                 new PowerUnlockController().SetEnabled(enabled);
+            else if (parts[0] == "--apply-camera"
+                && bool.TryParse(parts[1], out var cameraOn))
+                CameraControl.SetCamera(cameraOn);
+            else if (parts[0] == "--apply-clamshell"
+                && bool.TryParse(parts[1], out var clamshellOn))
+            {
+                if (clamshellOn) ClamshellControl.Enable();
+                else ClamshellControl.Disable();
+            }
+            else if (parts[0] == "--apply-power-plan"
+                && bool.TryParse(parts[1], out var performance))
+                PowerPlanHelper.SyncWithMode(performance);
+            else if (parts[0] == "--apply-stop-services")
+                HonorServices.StopAll();
             else if (parts[0] == "--grant-brightness-access")
                 HonorAcpiBrightness.GrantAccess();
             else if (parts[0] == "--read-sensors")

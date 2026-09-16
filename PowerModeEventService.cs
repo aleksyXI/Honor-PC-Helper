@@ -126,7 +126,7 @@ internal sealed class PowerModeEventService : IDisposable
         {
             0x2A0 => false,
             0x2A1 => true,
-            _ => !_currentState
+            _ => true
         };
         HardwareSettings.PerformanceModeActive = _currentState;
         _onModeChanged(_currentState);

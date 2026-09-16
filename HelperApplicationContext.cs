@@ -21,6 +21,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private long _lastSensorRefresh = -SensorRefreshIntervalMilliseconds;
     private long _suppressBacklightEventsUntil;
     private long _lastResumeRestore = -ResumeDebounceMilliseconds;
+    private long _lastModeErrorTime = -3000;
     private IntPtr _displayNotification;
     private IntPtr _hidNotification;
     private readonly System.Windows.Forms.Timer _deviceChangeTimer;
@@ -81,7 +82,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
         Program.ShowOsd = (icon, emoji, text) => _osdToast?.Show(icon, emoji, text);
         _backlightSchedule.Start();
         PowerPlanHelper.SyncWithMode(HardwareSettings.PerformanceModeActive);
-        AppLog.Info($"Power plan synced with mode: performance={HardwareSettings.PerformanceModeActive}");
         _driverComponentsTask = new DriverUpdateService().BuildDeviceListAsync();
         _ = _driverComponentsTask.ContinueWith(
             task => AppLog.Error("Background driver device inventory failed", task.Exception!),
@@ -285,40 +285,9 @@ internal sealed class HelperApplicationContext : ApplicationContext
 
     private void StopHonorServices()
     {
-        try
-        {
-            var services = new[] { "OSDServer", "MBAMainService", "HnUpdateService" };
-            foreach (var name in services)
-            {
-                try
-                {
-                    using var sc = new System.ServiceProcess.ServiceController(name);
-                    if (sc.Status != System.ServiceProcess.ServiceControllerStatus.Stopped)
-                        sc.Stop();
-                    sc.WaitForStatus(System.ServiceProcess.ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(10));
-                    AppLog.Info($"Service stopped: {name}");
-                }
-                catch (Exception ex) { AppLog.Info($"Service {name}: {ex.Message}"); }
-            }
-            foreach (var p in System.Diagnostics.Process.GetProcesses())
-            {
-                try
-                {
-                    var path = p.MainModule?.FileName ?? "";
-                    if (path.StartsWith(@"C:\Program Files\HONOR\", StringComparison.OrdinalIgnoreCase))
-                    {
-                        p.Kill();
-                        AppLog.Info($"Process killed: {p.ProcessName}");
-                    }
-                }
-                catch { }
-            }
-        }
-        catch (Exception ex)
-        {
-            AppLog.Error("StopHonorServices failed", ex);
-        }
+        HonorServices.StopAll();
     }
+
     private void ToggleStartup()
     {
         try
@@ -354,8 +323,13 @@ internal sealed class HelperApplicationContext : ApplicationContext
             return;
         if (enabled && !PerformanceModePolicy.CanEnable(out var reason))
         {
-            await DisablePerformanceModeAsync();
-            ShowError(reason);
+            var now = Environment.TickCount64;
+            if (now - Interlocked.Read(ref _lastModeErrorTime) >= 3000)
+            {
+                Interlocked.Exchange(ref _lastModeErrorTime, now);
+                ShowError(reason);
+            }
+            _ = DisablePerformanceModeAsync();
             return;
         }
         PowerPlanHelper.SyncWithMode(enabled);
@@ -385,11 +359,20 @@ internal sealed class HelperApplicationContext : ApplicationContext
             return;
         try
         {
-            CameraControl.SetCamera(enabled);
             _uiDispatcher.BeginInvoke(() =>
+            {
+                try
+                {
+                    CameraControl.SetCamera(enabled);
+                }
+                catch (Exception ex)
+                {
+                    AppLog.Error("Camera control failed", ex);
+                }
                 _osdToast.Show(enabled ? "OnCamera" : "OffCamera", "📷", enabled
                     ? L.T("Камера включена", "Camera On", "摄像头已开启")
-                    : L.T("Камера выключена", "Camera Off", "摄像头已关闭")));
+                    : L.T("Камера выключена", "Camera Off", "摄像头已关闭"));
+            });
         }
         catch (InvalidOperationException)
         {
@@ -714,7 +697,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
             return;
         HardwareSettings.PowerUnlock = false;
         HardwareSettings.PerformanceModeActive = false;
-        HandlePowerModeChanged(false);
+        PowerPlanHelper.SyncWithMode(false);
+        UpdateTrayIcon();
     }
     private sealed class MessageWindow : NativeWindow
     {

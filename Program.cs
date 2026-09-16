@@ -43,6 +43,10 @@ internal static class Program
             "--apply-battery-mode" => Silent(SetBatteryMode, value),
             "--apply-power-unlock" => Silent(SetPowerUnlock, value),
             "--apply-keyboard-backlight" => Silent(SetKeyboardBacklight, value),
+            "--apply-camera" => Silent(SetCamera, value),
+            "--apply-clamshell" => Silent(SetClamshell, value),
+            "--apply-power-plan" => Silent(SetPowerPlan, value),
+            "--apply-stop-services" => Silent(StopServices, value),
             "--apply-keyboard-backlight-timeout" => Silent(SetKeyboardBacklightTimeout, value),
 
             // Приходит и со значением (через фоновую задачу), и без него,
@@ -191,6 +195,34 @@ internal static class Program
         new KeyboardBacklightController().SetTimeout(seconds);
         return true;
     }
+
+    private static bool SetCamera(string? value)
+    {
+        if (!bool.TryParse(value, out var enabled))
+            return false;
+        CameraControl.SetCamera(enabled);
+        return true;
+    }
+
+    private static bool SetClamshell(string? value)
+    {
+        if (!bool.TryParse(value, out var enabled))
+            return false;
+        if (enabled) ClamshellControl.Enable();
+        else ClamshellControl.Disable();
+        return true;
+    }
+
+    private static bool SetPowerPlan(string? value)
+    {
+        if (!bool.TryParse(value, out var performance))
+            return false;
+        PowerPlanHelper.SyncWithMode(performance);
+        return true;
+    }
+
+    private static bool StopServices(string? value)
+        => HonorServices.StopAll();
 
     private static bool ReadSensors(string? requestId)
     {
