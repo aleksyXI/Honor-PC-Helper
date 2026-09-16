@@ -120,6 +120,10 @@ internal static class KeyboardBacklightMenu
             () =>
             {
                 HardwareSettings.KeyboardBacklight = level;
+                // Выбранный вручную уровень становится и уровнем расписания,
+                // чтобы вечером подсветка включалась той же яркости.
+                if (level != KeyboardBacklightLevel.Off)
+                    HardwareSettings.BacklightScheduleLevel = level;
                 scheduleService.SetManualOverride();
             });
 

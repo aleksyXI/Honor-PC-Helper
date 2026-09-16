@@ -135,6 +135,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
         if (HardwareSettings.ClamshellMode)
             ClamshellControl.Enable();
         StopHonorServices();
+        StartupManager.MigrateLegacyRunEntry();
         _ = RefreshSensorsAsync();
     }
     protected override void Dispose(bool disposing)
@@ -487,6 +488,9 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _uiDispatcher.BeginInvoke(() =>
             {
                 HardwareSettings.KeyboardBacklight = level;
+                // Уровень, выбранный клавишами, запоминается как уровень расписания.
+                if (level != KeyboardBacklightLevel.Off)
+                    HardwareSettings.BacklightScheduleLevel = level;
                 _backlightSchedule.SetManualOverride();
                 _osdToast?.Show(
                     level switch
