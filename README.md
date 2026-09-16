@@ -24,7 +24,25 @@ One portable `.exe` (~49 MB, self-contained): no installer, no service, no sched
 | **Touchpad → Edge gestures** | Brightness (left edge), Volume (right edge) | Enables or disables the vertical one-finger edge swipes |
 | **Performance mode** | On/off checkbox | Same switch as **Fn+P**. Requires AC power and at least 20% charge; turned off automatically on sleep and when the charger is unplugged. The tray icon is filled while it is on |
 | **Drivers** | — | Opens the driver and BIOS window, see [Drivers](#drivers) |
-| **Start with Windows** | On/off checkbox | Adds or removes an `HKCU\…\Run` entry |
+| **Start with Windows** | On/off checkbox | Creates a Task Scheduler logon task that runs the app with the highest privileges, so it starts **without a UAC prompt**. A legacy `HKCU\…\Run` entry is migrated to the task automatically |
+| **Screen refresh rate** | Max Hz, 60 Hz, Auto | Switches the internal panel refresh rate through the CCD API. **Auto** keeps the maximum on AC and drops to 60 Hz on battery. The choice is stored and restored after resume |
+| **Clamshell** | On/off checkbox | Keeps the laptop awake with the lid closed (`LIDACTION = 0`). Refuses to enable without an external monitor and shows an OSD; re-applied on start |
+| **Stop all HONOR services** | — | Stops and disables `OSDServer`, `MBAMainService`, `HnUpdateService` and kills HONOR processes. The app also does this on every launch |
+
+### Fork-specific features
+
+This fork (`aleksyXI/Honor-PC-Helper`) ports a set of additions tuned for the MagicBook Pro 14 (Arrow Lake, Arc 130T) on top of upstream:
+
+| Feature | What it does |
+| --- | --- |
+| **Camera key** | Toggles the camera at the driver level (`HKLM\SOFTWARE\HONOR\ASvidDMFT\Settings\CameraStatus`) and shows an OSD |
+| **Microphone key** | Mutes or unmutes every active capture device through CoreAudio and drives the key LED via `HardwareHal.dll` |
+| **Screenshot key** | Emulates `PrintScreen` |
+| **Touchpad key** | Shows the on/off OSD; the EC performs the hardware switch itself |
+| **PC-Manager-style OSD** | Notification plate built after the stock OSD service: 230×220 (scaled by the display DPI), 98 px icon, title and description, dark rounded plate at the bottom centre of the screen |
+| **Performance mode feedback** | On battery (or below 20%) a single "Cannot enable performance mode" OSD is shown instead of the mode flickering; the power plan always follows the mode and falls back to Balanced |
+| **HONOR services control** | On every launch the app stops and disables the three HONOR services and kills the HONOR processes, so PC Manager cannot fight the app for the hardware |
+| **No scheduled-task round trips** | The camera, clamshell, power plan and service control are applied directly (the app runs elevated), while the upstream charge-limit and backlight commands keep using the privileged task |
 
 Hovering the tray icon shows the live state: mode, backlight level, charge range, charge/discharge power in watts, CPU and battery temperature, both fan speeds. Sensors are polled at most once every 5 seconds and only while the pointer is on the icon.
 
@@ -36,7 +54,7 @@ Interface language follows the Windows display language: English, Russian, Simpl
 
 - Windows 10 or 11, x64
 - A HONOR laptop that exposes the HONOR BIOS WMI interface (`OemWMIMethod` in `root\WMI`) — the MagicBook family ships with it
-- No .NET runtime: the release build is self-contained
+- .NET Desktop Runtime 9 or 10 — this fork is published **framework-dependent** to keep the executable small; the official upstream release is self-contained and needs no runtime
 - HONOR PC Manager does **not** have to be installed or running
 
 Developed and verified on a HONOR MagicBook Pro 14 2026 (`ZQC-P`, BIOS 1.10, Windows 11 26200). Other models use the same interface, but the available features depend on the machine and the BIOS: touchpad haptics and edge gestures exist only on force-pad models, some machines expose fewer sensors. Anything the firmware does not answer is hidden from the menu.
@@ -74,9 +92,10 @@ The app checks GitHub Releases when the Drivers window is open. An update is dow
 
 | What | Where |
 | --- | --- |
-| Settings and cached state | `HKCU\Software\HonorPCHelper` |
-| Autostart entry | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `HonorPCHelper` |
+| Settings and cached state | `HKCU\Software\HonorPCHelper` (`ScreenRefreshRate`, `ScreenRateAuto`, `ClamshellMode` are added by this fork) |
+| Autostart entry | Task Scheduler → `HonorPCHelper Startup` (a legacy `HKCU\…\Run` value is removed on start) |
 | Log (1 MB, rotated to `.1`) | `%LocalAppData%\HonorPCHelper\HonorPCHelper.log` |
+| Native libraries extracted from the exe | `%LocalAppData%\HonorPCHelper\native` |
 | Downloads (removed at next start) | `%LocalAppData%\HonorPCHelper\DriverUpdates`, `…\AppUpdates` |
 | Privileged task | Task Scheduler → `Honor PC Helper Privileged Hardware` |
 
