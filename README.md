@@ -25,7 +25,7 @@ One portable `.exe` (~49 MB, self-contained): no installer, no service, no telem
 | **Performance mode** | On/off checkbox | Same switch as **Fn+P**. Requires AC power and at least 20% charge; turned off on sleep and when the charger is unplugged. The tray icon is filled while it is on. On models with HUNTER mode (MagicBook Pro 16 HUNTER) the item is greyed out while HUNTER is on: that mode is switched only in PC Manager |
 | **Update to …** | — | Appears while a newer release exists. Downloads and installs it; the app restarts |
 | **Drivers** | — | Opens the driver and BIOS window, see [Drivers](#drivers) |
-| **Start with Windows** | On/off checkbox | Adds or removes an `HKCU\…\Run` entry |
+| **Start with Windows** | On/off checkbox | Creates or removes the logon Task Scheduler task `HonorPCHelper Startup` (highest privileges, so the app is not stopped by a UAC prompt at sign-in) |
 
 Hovering the tray icon shows the live state: mode, backlight level, charge range, charge/discharge power in watts, CPU and battery temperature, both fan speeds (with the target speed, where the firmware reports one). The mode is read back from the firmware too, so a change made in PC Manager shows up. Sensors are polled at most once every 5 seconds and only while the pointer is on the icon.
 
@@ -42,6 +42,30 @@ Hovering the tray icon shows the live state: mode, backlight level, charge range
 Backlight level, haptics and edge gestures are reapplied after resume (including modern standby) and after the touchpad reconnects. The charge limit is checked after resume as well, and the chosen range is written back when the EC has dropped it.
 
 Interface language follows the Windows display language: English, Russian, Simplified Chinese.
+
+## Fork additions
+
+This build is based on Wintego/Honor-PC-Helper 1.13.5 and adds what HONOR PC Manager has but upstream does not.
+Everything upstream already does — F7 microphone with its LED, F8 camera, F12 screen snip, touchpad haptics and
+edge gestures, driver and BIOS updates, self-update — is left untouched.
+
+| Menu item | Options | Effect |
+| --- | --- | --- |
+| **Display** | `{max} Hz`, `60 Hz`, `Auto: maximum on AC, 60 on battery` | Refresh rate of the built-in panel. Windows does not remember it: the chosen rate is restored after sleep and reboot, and in auto mode it follows the power source |
+| **Work with the lid closed** | On/off checkbox | The laptop keeps running with the lid closed (`LIDACTION` in the active power scheme). Can only be enabled with an external monitor connected |
+| **Stop HONOR services** | — | Stops `OSDServer`, `MBAMainService` and `HnUpdateService` and disables their autostart. Done automatically at sign-in |
+
+Also in this build:
+
+- **The power scheme follows the mode.** Smart mode selects Balanced, performance mode and HUNTER select High
+  Performance. A known PC Manager bug — after switching back to smart mode the laptop stays on High Performance and
+  heats up on battery — is gone: the scheme is applied at startup, on **Fn+P** and when leaving performance mode.
+- **A HONOR-style on-screen plate instead of system notifications** (230×220, original PC Manager icons, DPI aware).
+  It accompanies the mode, backlight level, camera and microphone keys, the touchpad key (firmware events `0x2A3`
+  and `0x283`), the HONOR app key (`0x28A`), the refresh rate and a refused clamshell toggle.
+- **Autostart is a Task Scheduler task** (`HonorPCHelper Startup`, at logon, highest privileges), so the app starts
+  elevated without a UAC prompt. A leftover `HKCU\…\Run` entry or Startup-folder shortcut from older builds is
+  migrated into the task and removed.
 
 ## Requirements
 
@@ -88,7 +112,7 @@ The update is downloaded, then checked against the release asset size, the `sha2
 | What | Where |
 | --- | --- |
 | Settings and cached state | `HKCU\Software\HonorPCHelper` |
-| Autostart entry | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `HonorPCHelper` |
+| Autostart | Task Scheduler → `HonorPCHelper Startup` (at logon, highest privileges) |
 | Camera state | `HKLM\SOFTWARE\HONOR\ASvidDMFT\Settings\CameraStatus` |
 | Log (1 MB, rotated to `.1`) | `%LocalAppData%\HonorPCHelper\HonorPCHelper.log` |
 | Downloads (removed at next start) | `%LocalAppData%\HonorPCHelper\DriverUpdates`, `…\AppUpdates` |
