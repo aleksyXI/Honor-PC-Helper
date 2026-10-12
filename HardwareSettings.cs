@@ -28,6 +28,9 @@ internal static class HardwareSettings
     private const string BacklightScheduleLevelValue = "BacklightScheduleLevel";
     private const string TouchpadHapticsValue = "TouchpadHapticsLevel";
     private const string TouchpadEdgeGesturePrefix = "TouchpadEdgeGesture.";
+    private const string ScreenRefreshRateValue = "ScreenRefreshRate";
+    private const string ScreenRateAutoValue = "ScreenRateAuto";
+    private const string ClamshellModeValue = "ClamshellMode";
     private const string PendingHardwareCommandValue = "PendingHardwareCommand";
     private const string HardwareCommandResultValue = "HardwareCommandResult";
     private const string SensorSnapshotValue = "SensorSnapshot";
@@ -202,6 +205,31 @@ internal static class HardwareSettings
 
     internal static void SetTouchpadEdgeGesture(TouchpadEdgeGesture gesture, bool? enabled)
         => WriteInt(TouchpadEdgeGesturePrefix + gesture, enabled.HasValue ? enabled.Value ? 1 : 0 : null);
+
+    /// <summary>
+    /// Частота обновления встроенного экрана, выбранная человеком. Хранится
+    /// потому, что система её не запоминает: после перезагрузки и сна панель
+    /// возвращается к прежней.
+    /// </summary>
+    internal static int? ScreenRefreshRate
+    {
+        get => ReadInt(ScreenRefreshRateValue);
+        set => WriteInt(ScreenRefreshRateValue, value);
+    }
+
+    /// <summary>Автовыбор частоты: максимум на питании от сети, 60 Гц на батарее.</summary>
+    internal static bool ScreenRateAuto
+    {
+        get => ReadInt(ScreenRateAutoValue) is { } value && value != 0;
+        set => WriteInt(ScreenRateAutoValue, value ? 1 : 0);
+    }
+
+    /// <summary>Работа с закрытой крышкой включена человеком.</summary>
+    internal static bool ClamshellMode
+    {
+        get => ReadInt(ClamshellModeValue) is { } value && value != 0;
+        set => WriteInt(ClamshellModeValue, value ? 1 : 0);
+    }
 
     private static string? ReadString(string name)
     {

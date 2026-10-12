@@ -168,6 +168,18 @@ internal static class PrivilegedHardware
     internal static Task<bool> TryRunPowerUnlockTaskAsync(bool enabled, Elevation elevation = Elevation.Interactive)
         => Task.Run(() => TryRunTask(elevation, "--apply-power-unlock", enabled.ToString()));
 
+    // Работа с закрытой крышкой пишет в активную схему питания: раздел
+    // принадлежит системе, права нужны.
+    internal static Task<bool> TryRunClamshellTaskAsync(bool enabled, Elevation elevation = Elevation.Interactive)
+        => Task.Run(() => TryRunTask(elevation, "--apply-clamshell", enabled.ToString()));
+
+    /// <summary>
+    /// Службы HONOR останавливаются при входе в систему сами, а не по действию
+    /// человека, - окно UAC там недопустимо, поэтому задача обязательна.
+    /// </summary>
+    internal static Task<bool> TryRunStopServicesTaskAsync(Elevation elevation = Elevation.Interactive)
+        => Task.Run(() => TryRunTask(elevation, "--apply-stop-services", "1"));
+
     internal static Task<bool> TryReadSensorsTaskAsync()
         => Task.Run(() => TryReadSensorsTask(Elevation.UnlessDeclined));
 
@@ -285,6 +297,12 @@ internal static class PrivilegedHardware
                 return true;
             case "--apply-camera-off" when bool.TryParse(value, out var cameraOff):
                 CameraMuteController.SetCameraOff(cameraOff);
+                return true;
+            case "--apply-clamshell" when bool.TryParse(value, out var clamshell):
+                ClamshellControl.SetEnabled(clamshell);
+                return true;
+            case "--apply-stop-services":
+                HonorServices.StopAll();
                 return true;
             case "--grant-brightness-access":
                 HonorAcpiDirect.GrantAccess();
