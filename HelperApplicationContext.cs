@@ -8,9 +8,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
     // Мышь над иконкой трея генерирует поток событий, а сборка подсказки читает
     // реестр и WMI - поэтому обновление ограничено по частоте.
     private const int TooltipMinIntervalMilliseconds = 750;
-    // Оболочка сама решает, сколько держать уведомление; значение лишь
-    // подсказывает, что сообщение короткое и задерживать его незачем.
-    private const int NotificationTimeoutMilliseconds = 3_000;
 
     private readonly MessageWindow _window;
     private readonly Control _uiDispatcher;
@@ -24,6 +21,10 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private readonly MicMuteService _micMute;
     private readonly CameraMuteService _cameraMute;
     private readonly ApplicationUpdateWatcher _applicationUpdates;
+    // Плашка в стиле HONOR PC Manager: показывается вместо системных
+    // уведомлений, поэтому живёт наравне с остальными службами.
+    private readonly OSDToast _osdToast;
+    private long _lastModeErrorTime = -ModeErrorSuppressMilliseconds;
     private Icon _trayIcon;
     private IntPtr _tooltipText;
     private bool _tooltipAdded;
@@ -43,6 +44,9 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private long _lastTooltipUpdate;
     private const int ResumeSettleMilliseconds = 8000;
     private const int ResumeDebounceMilliseconds = 10000;
+    // Отказ включить производительный режим прошивка повторяет пачкой -
+    // повторные уведомления об одном и том же подавляются.
+    private const int ModeErrorSuppressMilliseconds = 3_000;
     // Перечень драйверов (Win32_PnPSignedDriver) - самый тяжёлый запрос WMI
     // приложения. Сразу после входа в систему он соперничал бы с автозагрузкой,
     // поэтому собирается с задержкой - или сразу, если окно драйверов
@@ -73,6 +77,13 @@ internal sealed class HelperApplicationContext : ApplicationContext
         _cameraMute = new CameraMuteService();
         _applicationUpdates = new ApplicationUpdateWatcher();
         ApplicationUpdateWatcher.Changed += OnApplicationUpdateChanged;
+        // Конструктор выполняется в потоке интерфейса, том же, где живёт значок
+        // в трее и где плашке разрешено появляться.
+        _osdToast = new OSDToast();
+        // Через ShowNotification: плашку просят показать и из фоновых потоков
+        // (опрос датчиков, частота экрана), а ей нужен поток интерфейса.
+        Program.ShowOsd = (icon, emoji, title, description) =>
+            ShowNotification(icon, emoji, title, description ?? string.Empty);
         // Выбор, сделанный до появления отдельного значения в реестре,
         // переносится до первого опроса датчиков - иначе пороги, потерянные
         // прошивкой, успеют его перезаписать.
@@ -156,7 +167,9 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 HandleMicMuteKey,
                 HandleCameraKey,
                 HandleScreenshotKey,
-                ShouldIgnoreBacklightEvent);
+                ShouldIgnoreBacklightEvent,
+                HandleTouchpadChanged,
+                HandleHonorAppKey);
             events.Start();
             _powerModeEvents = events;
             // Приложение могло закрыться, пока служба поднималась.
@@ -182,6 +195,22 @@ internal sealed class HelperApplicationContext : ApplicationContext
         // доставалась первому нажатию F8.
         _ = Task.Run(_cameraMute.Prepare);
 
+        // Режим, оставленный прошивкой после перезагрузки, может не совпадать
+        // со схемой питания - известный баг PC Manager, когда ноутбук остаётся
+        // на высокой производительности на батарее.
+        PowerPlanHelper.SyncWithMode(HardwareSettings.PerformanceModeActive || HardwareSettings.HunterModeActive);
+        // Частота встроенного экрана системой не запоминается.
+        ScreenControl.Restore();
+        // Режим закрытой крышки живёт в схеме питания и сбрасывается вместе с ней.
+        if (HardwareSettings.ClamshellMode)
+            _ = PrivilegedHardware.TryRunClamshellTaskAsync(true, Elevation.Never);
+        // Службы HONOR останавливаются при входе сами: человек этого действия
+        // не инициировал, поэтому окно UAC здесь недопустимо.
+        _ = PrivilegedHardware.TryRunStopServicesTaskAsync(Elevation.Never);
+        // Автозапуск прежних сборок жил в Run-ключе; он не умеет поднимать
+        // приложение с правами без запроса UAC и переносится в задачу.
+        StartupManager.MigrateLegacyRunEntry();
+
         _ = RefreshSensorsAsync();
     }
 
@@ -197,6 +226,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _micMute.Dispose();
             ApplicationUpdateWatcher.Changed -= OnApplicationUpdateChanged;
             _applicationUpdates.Dispose();
+            Program.ShowOsd = null;
+            _osdToast.Dispose();
             HideNativeTooltip();
             if (_tooltipHandle != IntPtr.Zero)
                 NativeMethods.DestroyWindow(_tooltipHandle);
@@ -251,6 +282,30 @@ internal sealed class HelperApplicationContext : ApplicationContext
         }
 
         PowerUnlockMenu.Build(menu, UpdateTrayIcon);
+
+        var screenSub = menu.AddSubMenu(
+            L.T("Экран", "Display", "屏幕"),
+            L.T("Частота обновления встроенного экрана.",
+                "Refresh rate of the built-in display.",
+                "内置显示屏刷新率。"));
+        BuildScreenMenu(screenSub);
+
+        menu.AddItem(
+            L.T("Работать с закрытой крышкой", "Work with the lid closed", "合盖继续工作"),
+            () => SetClamshell(!HardwareSettings.ClamshellMode),
+            @checked: HardwareSettings.ClamshellMode,
+            tooltip: L.T(
+                "Ноутбук продолжает работу при закрытой крышке. Нужен подключённый внешний монитор.",
+                "The laptop keeps running with the lid closed. An external monitor must be connected.",
+                "合上盖子后笔记本继续工作，需要连接外接显示器。"));
+
+        menu.AddItem(
+            L.T("Остановить службы HONOR", "Stop HONOR services", "停止 HONOR 服务"),
+            StopHonorServices,
+            tooltip: L.T(
+                "Останавливает службы PC Manager, OSD и обновлений и снимает их с автозапуска.",
+                "Stops the PC Manager, OSD and update services and disables their autostart.",
+                "停止电脑管家、OSD 和更新服务，并禁用其开机自启动。"));
 
         if (ApplicationUpdateWatcher.Available is { } applicationUpdate)
         {
@@ -338,6 +393,87 @@ internal sealed class HelperApplicationContext : ApplicationContext
         }
     }
 
+    /// <summary>
+    /// Частота экрана: две ступени и автовыбор по питанию. Галочка ставится на
+    /// ту частоту, которая стоит сейчас, - меню собирается заново при каждом
+    /// открытии, поэтому выбор всегда актуален.
+    /// </summary>
+    private void BuildScreenMenu(NativePopupMenu menu)
+    {
+        var maxRate = ScreenControl.GetMaxRate();
+        var currentRate = ScreenControl.GetCurrentRate();
+        var manual = !ScreenControl.IsAuto();
+
+        if (maxRate > 0)
+            menu.AddItem(
+                L.T($"{maxRate} Гц", $"{maxRate} Hz", $"{maxRate} 赫兹"),
+                () => ScreenControl.SetRate(maxRate),
+                @checked: manual && currentRate == maxRate,
+                tooltip: L.T(
+                    $"Наибольшая доступная частота панели - {maxRate} Гц.",
+                    $"The highest refresh rate of the panel - {maxRate} Hz.",
+                    $"面板的最高刷新率 - {maxRate} 赫兹。"));
+
+        menu.AddItem(
+            L.T("60 Гц", "60 Hz", "60 赫兹"),
+            () => ScreenControl.SetRate(60),
+            @checked: manual && currentRate == 60,
+            tooltip: L.T(
+                "Экономит заряд батареи и снижает нагрев.",
+                "Saves battery and lowers heat.",
+                "节省电量并降低发热。"));
+
+        menu.AddSeparator();
+        menu.AddItem(
+            L.T("Авто: максимум на сети, 60 от батареи",
+                "Auto: maximum on AC, 60 on battery",
+                "自动：接通电源最高，电池 60"),
+            () => ScreenControl.SetAuto(!ScreenControl.IsAuto()),
+            @checked: ScreenControl.IsAuto(),
+            tooltip: L.T(
+                "Частота переключается при смене питания и восстанавливается после сна.",
+                "The refresh rate follows the power source and is restored after sleep.",
+                "刷新率随电源变化，并会在睡眠后恢复。"));
+    }
+
+    /// <summary>
+    /// Режим закрытой крышки применяется привилегированной задачей: настройка
+    /// лежит в активной схеме питания. Без внешнего монитора он бессмысленен -
+    /// ноутбук закроется вслепую, поэтому предлагается подключить монитор.
+    /// </summary>
+    private void SetClamshell(bool enabled)
+    {
+        if (enabled && !ScreenNative.IsExternalDisplayConnected())
+        {
+            _osdToast.Show(
+                "imageIcon", "🖥️",
+                L.T("Невозможно включить режим закрытой крышки", "Cannot enable clamshell mode", "无法开启合盖模式"),
+                L.T("Подключите внешний монитор", "Connect an external monitor", "请连接外接显示器"));
+            return;
+        }
+
+        _ = HardwareCommand.ApplyAsync(
+            () => PrivilegedHardware.TryRunClamshellTaskAsync(enabled),
+            "--set-clamshell",
+            enabled.ToString(),
+            L.T("Не удалось изменить режим закрытой крышки.",
+                "Could not change the clamshell setting.",
+                "无法修改合盖模式。"),
+            () => HardwareSettings.ClamshellMode = enabled);
+    }
+
+    // Службы HONOR при входе останавливаются сами; этот пункт нужен, если их
+    // запустили заново - например, вместе с PC Manager после его обновления.
+    private void StopHonorServices()
+        => _ = HardwareCommand.ApplyAsync(
+            () => PrivilegedHardware.TryRunStopServicesTaskAsync(),
+            "--set-stop-services",
+            "1",
+            L.T("Не удалось остановить службы HONOR.",
+                "Could not stop the HONOR services.",
+                "无法停止 HONOR 服务。"),
+            () => { });
+
     private void ShowError(string message)
     {
         if (_disposed)
@@ -353,14 +489,42 @@ internal sealed class HelperApplicationContext : ApplicationContext
 
         if (enabled && !PerformanceModePolicy.CanEnable(out var reason))
         {
+            ShowModeError(reason);
             // Режим включил сам человек клавишами Fn+P, поэтому один запрос UAC
             // здесь допустим - но не после того, как он уже отказал.
             await DisablePerformanceModeAsync(Elevation.UnlessDeclined);
-            ShowError(reason);
             return;
         }
 
+        // Схему питания прошивка меняет по режиму, но делает это не всегда
+        // правильно, поэтому она приводится к режиму явно.
+        PowerPlanHelper.SyncWithMode(enabled || HardwareSettings.HunterModeActive);
+        if (HardwareSettings.HunterModeActive)
+            _osdToast.Show("performance", "🎮", "HUNTER");
+        else if (enabled)
+            _osdToast.Show("performance", "⚡",
+                L.T("Производительный режим", "Performance mode", "性能模式"));
+        else
+            _osdToast.Show("intelligence", "🛡️",
+                L.T("Умный режим", "Smart mode", "智能模式"));
         UpdateTrayIcon();
+    }
+
+    /// <summary>
+    /// Отказ включить производительный режим прошивка повторяет пачкой
+    /// событий, а причина одна и та же - повторные плашки подавляются.
+    /// </summary>
+    private void ShowModeError(string reason)
+    {
+        var now = Environment.TickCount64;
+        if (now - Interlocked.Read(ref _lastModeErrorTime) < ModeErrorSuppressMilliseconds)
+            return;
+
+        Interlocked.Exchange(ref _lastModeErrorTime, now);
+        _osdToast.Show(
+            "performance", "⚠️",
+            L.T("Сбой включения производительного режима", "Failed to enable performance mode", "无法开启高性能模式"),
+            reason);
     }
 
     private void HandlePowerModeChanged(bool enabled)
@@ -421,6 +585,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
         AppLog.Info("Display turned on, restoring keyboard backlight");
         _ = _backlightSchedule.RestoreAfterResumeAsync();
         _ = _batteryProtection.RestoreAfterResumeAsync();
+        // Частота экрана после сна возвращается системой к прежней.
+        ScreenControl.Restore();
         TouchpadHapticsController.Reapply();
         TouchpadGesturesController.Reapply();
         // Индикатор микрофона прошивка после сна не восстанавливает.
@@ -438,6 +604,20 @@ internal sealed class HelperApplicationContext : ApplicationContext
             {
                 HardwareSettings.KeyboardBacklight = level;
                 _backlightSchedule.SetManualOverride();
+                _osdToast.Show(
+                    level switch
+                    {
+                        KeyboardBacklightLevel.Off => "OffLevel",
+                        KeyboardBacklightLevel.Low => "LowLevel",
+                        _ => "HighLevel"
+                    },
+                    "⌨️",
+                    level switch
+                    {
+                        KeyboardBacklightLevel.Off => L.T("Подсветка выключена", "Backlight off", "背光已关闭"),
+                        KeyboardBacklightLevel.Low => L.T("Подсветка: низкий уровень", "Backlight low", "低亮度背光"),
+                        _ => L.T("Подсветка: высокий уровень", "Backlight high", "高亮度背光")
+                    });
             });
         }
         catch (InvalidOperationException)
@@ -467,6 +647,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private void ShowMicrophoneNotification(bool muted)
     {
         ShowNotification(
+            muted ? "EnMic" : "OnMic",
+            muted ? "🔇" : "🎙️",
             muted
                 ? L.T("Микрофон выключен", "Microphone is off", "麦克风已关闭")
                 : L.T("Микрофон включён", "Microphone is on", "麦克风已开启"),
@@ -500,6 +682,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private void ShowCameraNotification(bool off)
     {
         ShowNotification(
+            off ? "OffCamera" : "OnCamera",
+            "📷",
             off
                 ? L.T("Камера выключена", "Camera is off", "摄像头已关闭")
                 : L.T("Камера включена", "Camera is on", "摄像头已开启"),
@@ -532,8 +716,13 @@ internal sealed class HelperApplicationContext : ApplicationContext
         });
     }
 
-    // Уведомление показывает значок в трее, а он живёт в потоке интерфейса.
-    private void ShowNotification(string title, string text)
+    /// <summary>
+    /// Плашка в стиле HONOR PC Manager вместо системного уведомления: всплывашка
+    /// оболочки перекрывает значок трея и выглядит чужой, а экранные клавиши
+    /// в PC Manager сопровождались именно плашкой. Показывается из потока
+    /// интерфейса, куда переходят событие WMI и привилегированная задача.
+    /// </summary>
+    private void ShowNotification(string? icon, string emoji, string title, string description = "")
     {
         if (_disposed || _uiDispatcher.IsDisposed)
             return;
@@ -542,20 +731,30 @@ internal sealed class HelperApplicationContext : ApplicationContext
         {
             _uiDispatcher.BeginInvoke(() =>
             {
-                if (_disposed)
-                    return;
-
-                _notifyIcon.ShowBalloonTip(
-                    NotificationTimeoutMilliseconds,
-                    title,
-                    text,
-                    ToolTipIcon.Info);
+                if (!_disposed)
+                    _osdToast.Show(icon, emoji, title, description);
             });
         }
         catch (InvalidOperationException)
         {
         }
     }
+
+    // Отключение и включение тачпада делает сама прошивка по клавише; событие
+    // приходит направленным (не переключателем), и приложение только показывает,
+    // что с тачпадом стало.
+    private void HandleTouchpadChanged(bool enabled)
+        => ShowNotification(
+            enabled ? "OnTouch" : "EnTouch",
+            "🖱️",
+            enabled
+                ? L.T("Тачпад включён", "Touchpad on", "触控板已开启")
+                : L.T("Тачпад выключен", "Touchpad off", "触控板已关闭"));
+
+    // Клавиша вызова приложения HONOR: PC Manager открывался по ней, поэтому
+    // становится видно, что нажатие дошло.
+    private void HandleHonorAppKey()
+        => ShowNotification("imageIcon", "🔧", "Honor PC Helper");
 
     private void OnTrayIconMouseMove(object? sender, MouseEventArgs eventArgs)
     {
@@ -765,6 +964,10 @@ internal sealed class HelperApplicationContext : ApplicationContext
             return;
         }
 
+        // Запитан ли ноутбук от сети, решает, какую частоту держать в автовыборе.
+        if (eventArgs.Mode == Microsoft.Win32.PowerModes.StatusChange)
+            ScreenControl.Restore();
+
         if (eventArgs.Mode == Microsoft.Win32.PowerModes.Resume)
         {
             HardwareSettings.PowerUnlock = false;
@@ -773,6 +976,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
             Interlocked.Exchange(ref _suppressBacklightEventsUntil, Environment.TickCount64 + ResumeSettleMilliseconds);
             _ = _backlightSchedule.RestoreAfterResumeAsync();
             _ = _batteryProtection.RestoreAfterResumeAsync();
+            ScreenControl.Restore();
             _ = Task.Run(_micMute.Sync);
         }
     }

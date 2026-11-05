@@ -11,6 +11,13 @@ internal static class Program
     private delegate bool HardwareAction(string? value);
 
     /// <summary>
+    /// Показ плашки OSD: реализацию ставит контекст приложения, поэтому
+    /// обращаться к ней можно из любого потока и до его создания.
+    /// Аргументы: имя иконки (или null), эмодзи-замена, заголовок, описание.
+    /// </summary>
+    internal static Action<string?, string, string, string?>? ShowOsd;
+
+    /// <summary>
     /// Без аргументов приложение работает как значок в трее. С аргументами это
     /// служебный запуск одной командой:
     ///
@@ -36,6 +43,8 @@ internal static class Program
             "--set-keyboard-backlight" => Interactive(AlsoRegister(SetKeyboardBacklight), value),
             "--set-keyboard-backlight-timeout" => Interactive(AlsoRegister(SetKeyboardBacklightTimeout), value),
             "--set-camera-off" => Interactive(AlsoRegister(SetCameraOff), value),
+            "--set-clamshell" => Interactive(AlsoRegister(SetClamshell), value),
+            "--set-stop-services" => Interactive(AlsoRegister(StopServices), value),
             "--read-sensors" => Interactive(AlsoRegister(ReadSensors), value),
 
             "--apply-battery-mode" => Silent(SetBatteryMode, value),
@@ -43,6 +52,8 @@ internal static class Program
             "--apply-keyboard-backlight" => Silent(SetKeyboardBacklight, value),
             "--apply-keyboard-backlight-timeout" => Silent(SetKeyboardBacklightTimeout, value),
             "--apply-camera-off" => Silent(SetCameraOff, value),
+            "--apply-clamshell" => Silent(SetClamshell, value),
+            "--apply-stop-services" => Silent(StopServices, value),
 
             // Приходит и со значением (через фоновую задачу), и без него,
             // когда задача ещё не установлена и приложение поднимается через UAC.
@@ -202,6 +213,21 @@ internal static class Program
         CameraMuteController.SetCameraOff(off);
         return true;
     }
+
+    // Работа с закрытой крышкой: LIDACTION в активной схеме питания.
+    private static bool SetClamshell(string? value)
+    {
+        if (!bool.TryParse(value, out var enabled))
+            return false;
+
+        ClamshellControl.SetEnabled(enabled);
+        return true;
+    }
+
+    // Службы HONOR не отвечают за оборудование ноутбука, а обновление и OSD
+    // от PC Manager мешают: останавливаются и снимаются с автозапуска.
+    private static bool StopServices(string? _)
+        => HonorServices.StopAll();
 
     private static bool ReadSensors(string? requestId)
     {

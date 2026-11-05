@@ -24,11 +24,23 @@ internal sealed class PowerModeEventService : IDisposable
     // переключение, по первому событию и без задержки.
     private const int HotkeyDebounceMilliseconds = 400;
 
+    // Клавиша тачпада: прошивка сама выключает и включает тачпад и сообщает
+    // итог направленным событием (не переключателем), поэтому приложение
+    // только показывает состояние.
+    private const uint TouchpadOffCode = 0x2A3;
+    private const uint TouchpadOnCode = 0x283;
+
+    // Клавиша вызова приложения HONOR: на MagicBook Pro 14 она открывала
+    // PC Manager, отдельного виртуального кода у неё нет.
+    private const uint HonorAppKeyCode = 0x28A;
+
     private readonly Action<bool> _onModeChanged;
     private readonly Action<KeyboardBacklightLevel> _onBacklightChanged;
     private readonly Action _onMicMuteKey;
     private readonly Action _onCameraKey;
     private readonly Action _onScreenshotKey;
+    private readonly Action<bool> _onTouchpadChanged;
+    private readonly Action _onHonorAppKey;
     private readonly Func<bool>? _shouldIgnoreBacklightEvent;
     private ManagementEventWatcher? _watcher;
     private long _lastEventTime;
@@ -45,13 +57,17 @@ internal sealed class PowerModeEventService : IDisposable
         Action onMicMuteKey,
         Action onCameraKey,
         Action onScreenshotKey,
-        Func<bool>? shouldIgnoreBacklightEvent = null)
+        Func<bool>? shouldIgnoreBacklightEvent = null,
+        Action<bool>? onTouchpadChanged = null,
+        Action? onHonorAppKey = null)
     {
         _onModeChanged = onModeChanged;
         _onBacklightChanged = onBacklightChanged;
         _onMicMuteKey = onMicMuteKey;
         _onCameraKey = onCameraKey;
         _onScreenshotKey = onScreenshotKey;
+        _onTouchpadChanged = onTouchpadChanged ?? (_ => { });
+        _onHonorAppKey = onHonorAppKey ?? (() => { });
         _shouldIgnoreBacklightEvent = shouldIgnoreBacklightEvent;
     }
 
@@ -118,6 +134,20 @@ internal sealed class PowerModeEventService : IDisposable
         {
             if (Accept(ref _lastScreenshotKeyTime))
                 _onScreenshotKey();
+            return;
+        }
+
+        if (code is TouchpadOffCode or TouchpadOnCode)
+        {
+            // Событие сообщает итоговое состояние тачпада, а не нажатие,
+            // поэтому повтор безвреден и порог здесь не нужен.
+            _onTouchpadChanged(code == TouchpadOnCode);
+            return;
+        }
+
+        if (code == HonorAppKeyCode)
+        {
+            _onHonorAppKey();
             return;
         }
 
