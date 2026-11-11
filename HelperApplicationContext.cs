@@ -40,9 +40,10 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private IntPtr _lidNotification;
     private IntPtr _hidNotification;
     private readonly System.Windows.Forms.Timer _deviceChangeTimer;
-    // Смена конфигурации дисплея приходит несколькими событиями подряд,
-    // поэтому режим закрытой крышки пересматривается один раз после паузы.
-    private readonly System.Windows.Forms.Timer _clamshellTimer;
+    // Смена конфигурации дисплея приходит несколькими событиями подряд, а сами
+    // события приходят не из потока интерфейса: режим закрытой крышки
+    // пересматривается один раз после паузы по номеру последнего запроса.
+    private int _clamshellGeneration;
     private Point _lastTrayMousePosition;
     private string _tooltipCache = string.Empty;
     private long _lastTooltipUpdate;
@@ -116,8 +117,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
         _trayHoverTimer.Tick += OnTrayHoverTimerTick;
         _deviceChangeTimer = new System.Windows.Forms.Timer { Interval = 1_000 };
         _deviceChangeTimer.Tick += OnDeviceChangeTimerTick;
-        _clamshellTimer = new System.Windows.Forms.Timer { Interval = ClamshellSettleMilliseconds };
-        _clamshellTimer.Tick += OnClamshellTimerTick;
 
         _touchpadService = new TouchpadBrightnessService(ShowError);
         _hidNotification = NativeMethods.RegisterHidDeviceNotification(_window.Handle);
@@ -264,7 +263,6 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 NativeMethods.UnregisterPowerSettingNotification(_lidNotification);
                 _lidNotification = IntPtr.Zero;
             }
-            _clamshellTimer.Dispose();
             // Датчик отпечатка мог остаться отключённым при закрытой крышке:
             // приложение закрывают и в этом состоянии.
             if (HardwareSettings.FingerprintOffLid)
@@ -553,13 +551,21 @@ internal sealed class HelperApplicationContext : ApplicationContext
     /// </summary>
     private void ScheduleClamshellUpdate()
     {
-        _clamshellTimer.Stop();
-        _clamshellTimer.Start();
+        var generation = Interlocked.Increment(ref _clamshellGeneration);
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(ClamshellSettleMilliseconds);
+            // За время паузы пришёл более свежий запрос - решает он.
+            if (_disposed
+                || Interlocked.CompareExchange(ref _clamshellGeneration, 0, generation) != generation)
+                return;
+
+            await ApplyClamshellConditionsAsync();
+        });
     }
 
-    private async void OnClamshellTimerTick(object? sender, EventArgs eventArgs)
+    private async Task ApplyClamshellConditionsAsync()
     {
-        _clamshellTimer.Stop();
         if (!HardwareSettings.ClamshellMode)
             return;
 
@@ -1126,6 +1132,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _ = _backlightSchedule.RestoreAfterResumeAsync();
             _ = _batteryProtection.RestoreAfterResumeAsync();
             ScreenControl.Restore();
+            ScheduleClamshellUpdate();
             _ = Task.Run(_micMute.Sync);
         }
     }
