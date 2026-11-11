@@ -9,12 +9,16 @@ namespace HonorPCHelper;
 /// "сон", ноутбук с подключённым внешним монитором уходит в сон и работу
 /// продолжать не может. Значение лежит в разделе кнопок схемы (LIDACTION) и
 /// принадлежит системе, поэтому запись идёт через привилегированную задачу.
+///
+/// Меняется только значение "от сети": на батарее ноутбук обязан засыпать,
+/// иначе он остаётся работать в сумке. Действие, которое стояло у человека,
+/// запоминается и возвращается, когда режим снимается.
 /// </summary>
 internal static class ClamshellControl
 {
     private static readonly Guid ButtonSubgroup = new("4f971e89-eebd-4455-a8de-9e59040e7347");
     private static readonly Guid LidActionSetting = new("5CA83367-6E45-459F-A27B-476B1D01C936");
-    private const uint LidActionNone = 0;
+    private const uint LidActionNothing = 0;
     private const uint LidActionSleep = 1;
 
     [DllImport("powrprof.dll", EntryPoint = "PowerGetActiveScheme", CharSet = CharSet.Unicode)]
@@ -25,9 +29,6 @@ internal static class ClamshellControl
 
     [DllImport("powrprof.dll")]
     private static extern uint PowerWriteACValueIndex(nint root, Guid schemeGuid, Guid subgroupGuid, Guid settingGuid, uint value);
-
-    [DllImport("powrprof.dll")]
-    private static extern uint PowerWriteDCValueIndex(nint root, Guid schemeGuid, Guid subgroupGuid, Guid settingGuid, uint value);
 
     [DllImport("powrprof.dll", EntryPoint = "PowerSetActiveScheme", CharSet = CharSet.Unicode)]
     private static extern uint PowerSetActiveScheme(nint userPowerKey, ref Guid schemeGuid);
@@ -46,28 +47,76 @@ internal static class ClamshellControl
         }
     }
 
-    private static void SetLidAction(uint action)
+    /// <summary>Действие крышки при питании от сети; сон, если схема не читается.</summary>
+    internal static uint GetAcAction()
+    {
+        if (GetActiveScheme() is not { } active)
+            return LidActionSleep;
+        return PowerReadACValueIndex(nint.Zero, active, ButtonSubgroup, LidActionSetting, out var value) == 0
+            ? value
+            : LidActionSleep;
+    }
+
+    /// <summary>
+    /// Действие, которое вернётся при снятии режима. Запоминается при первом
+    /// включении; если человек ничего не выбирал, это сон.
+    /// </summary>
+    private static uint RestoreAction =>
+        HardwareSettings.ClamshellDefaultLidAction is { } saved && saved is >= 1 and <= 3
+            ? (uint)saved
+            : LidActionSleep;
+
+    /// <summary>
+    /// Включает режим: крышка ничего не делает, пока ноутбук на зарядке.
+    /// Стоящее до этого действие запоминается - его вернёт выключение.
+    /// </summary>
+    internal static void Enable()
+    {
+        var current = GetAcAction();
+        // В схеме уже "ничего не делать": это чужой выбор, восстанавливать его
+        // после снятия режима нечем, поэтому схема не трогается.
+        if (current == LidActionNothing)
+            return;
+
+        if (HardwareSettings.ClamshellDefaultLidAction is null)
+            HardwareSettings.ClamshellDefaultLidAction = (int)current;
+
+        WriteAcAction(LidActionNothing);
+        HardwareSettings.ClamshellEngaged = true;
+    }
+
+    /// <summary>
+    /// Снимает режим: возвращает действие, стоявшее до включения. Запись идёт,
+    /// только если режим включало приложение - иначе затиралась бы настройка,
+    /// выставленная человеком вручную.
+    /// </summary>
+    internal static void Disable()
+    {
+        if (!HardwareSettings.ClamshellEngaged)
+            return;
+
+        var restore = RestoreAction;
+        if (GetAcAction() != restore)
+            WriteAcAction(restore);
+
+        HardwareSettings.ClamshellEngaged = false;
+    }
+
+    /// <summary>Точка входа команды --apply-clamshell.</summary>
+    internal static void SetEnabled(bool enabled)
+    {
+        if (enabled)
+            Enable();
+        else
+            Disable();
+    }
+
+    private static void WriteAcAction(uint action)
     {
         if (GetActiveScheme() is not { } active)
             return;
         PowerWriteACValueIndex(nint.Zero, active, ButtonSubgroup, LidActionSetting, action);
-        PowerWriteDCValueIndex(nint.Zero, active, ButtonSubgroup, LidActionSetting, action);
         // Запись в схему не применяется, пока схема не активирована повторно.
         PowerSetActiveScheme(nint.Zero, ref active);
-    }
-
-    private static uint GetLidAction()
-    {
-        if (GetActiveScheme() is not { } active)
-            return LidActionSleep;
-        return PowerReadACValueIndex(nint.Zero, active, ButtonSubgroup, LidActionSetting, out var value) == 0 ? value : LidActionSleep;
-    }
-
-    /// <summary>Включённый clamshell - крышка ничего не делает; выключенный - прежний сон.</summary>
-    internal static void SetEnabled(bool enabled)
-    {
-        var action = enabled ? LidActionNone : LidActionSleep;
-        if (GetLidAction() != action)
-            SetLidAction(action);
     }
 }

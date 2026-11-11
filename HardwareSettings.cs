@@ -31,6 +31,9 @@ internal static class HardwareSettings
     private const string ScreenRefreshRateValue = "ScreenRefreshRate";
     private const string ScreenRateAutoValue = "ScreenRateAuto";
     private const string ClamshellModeValue = "ClamshellMode";
+    private const string ClamshellDefaultLidActionValue = "ClamshellDefaultLidAction";
+    private const string ClamshellEngagedValue = "ClamshellEngaged";
+    private const string FingerprintOffLidValue = "FingerprintOffLid";
     private const string PendingHardwareCommandValue = "PendingHardwareCommand";
     private const string HardwareCommandResultValue = "HardwareCommandResult";
     private const string SensorSnapshotValue = "SensorSnapshot";
@@ -229,6 +232,34 @@ internal static class HardwareSettings
     {
         get => ReadInt(ClamshellModeValue) is { } value && value != 0;
         set => WriteInt(ClamshellModeValue, value ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Режим включён и уже записан в схему питания. Флаг нужен, чтобы снятие
+    /// режима возвращало прежнее действие крышки, а не затирало настройку,
+    /// выставленную человеком.
+    /// </summary>
+    internal static bool ClamshellEngaged
+    {
+        get => ReadInt(ClamshellEngagedValue) is { } value && value != 0;
+        set => WriteInt(ClamshellEngagedValue, value ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Действие крышки, стоявшее до включения режима: 1 сон, 2 гибернация,
+    /// 3 завершение работы. null - режим ещё ни разу не включался.
+    /// </summary>
+    internal static int? ClamshellDefaultLidAction
+    {
+        get => ReadInt(ClamshellDefaultLidActionValue);
+        set => WriteInt(ClamshellDefaultLidActionValue, value);
+    }
+
+    /// <summary>Датчик отпечатка отключается, пока крышка закрыта.</summary>
+    internal static bool FingerprintOffLid
+    {
+        get => ReadInt(FingerprintOffLidValue) is { } value && value != 0;
+        set => WriteInt(FingerprintOffLidValue, value ? 1 : 0);
     }
 
     private static string? ReadString(string name)

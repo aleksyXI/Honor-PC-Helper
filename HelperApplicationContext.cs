@@ -37,12 +37,17 @@ internal sealed class HelperApplicationContext : ApplicationContext
     private long _suppressBacklightEventsUntil;
     private long _lastResumeRestore = -ResumeDebounceMilliseconds;
     private IntPtr _displayNotification;
+    private IntPtr _lidNotification;
     private IntPtr _hidNotification;
     private readonly System.Windows.Forms.Timer _deviceChangeTimer;
+    // Смена конфигурации дисплея приходит несколькими событиями подряд,
+    // поэтому режим закрытой крышки пересматривается один раз после паузы.
+    private readonly System.Windows.Forms.Timer _clamshellTimer;
     private Point _lastTrayMousePosition;
     private string _tooltipCache = string.Empty;
     private long _lastTooltipUpdate;
     private const int ResumeSettleMilliseconds = 8000;
+    private const int ClamshellSettleMilliseconds = 2000;
     private const int ResumeDebounceMilliseconds = 10000;
     // Отказ включить производительный режим прошивка повторяет пачкой -
     // повторные уведомления об одном и том же подавляются.
@@ -56,7 +61,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
 
     internal HelperApplicationContext()
     {
-        _window = new MessageWindow(OnMenuTooltip, OnDisplayResume, OnHidDeviceChange);
+        _window = new MessageWindow(OnMenuTooltip, OnDisplayResume, OnHidDeviceChange, OnLidChanged);
         _uiDispatcher = new Control();
         _ = _uiDispatcher.Handle;
         _tooltipHandle = NativeMethods.CreateWindowEx(
@@ -111,13 +116,19 @@ internal sealed class HelperApplicationContext : ApplicationContext
         _trayHoverTimer.Tick += OnTrayHoverTimerTick;
         _deviceChangeTimer = new System.Windows.Forms.Timer { Interval = 1_000 };
         _deviceChangeTimer.Tick += OnDeviceChangeTimerTick;
+        _clamshellTimer = new System.Windows.Forms.Timer { Interval = ClamshellSettleMilliseconds };
+        _clamshellTimer.Tick += OnClamshellTimerTick;
 
         _touchpadService = new TouchpadBrightnessService(ShowError);
         _hidNotification = NativeMethods.RegisterHidDeviceNotification(_window.Handle);
         Microsoft.Win32.SystemEvents.PowerModeChanged += OnSystemPowerModeChanged;
         Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+        Microsoft.Win32.SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+        Microsoft.Win32.SystemEvents.SessionEnding += OnSessionEnding;
         _displayNotification = NativeMethods.RegisterPowerSettingNotification(
             _window.Handle, NativeMethods.GuidConsoleDisplayState, NativeMethods.DeviceNotifyWindowHandle);
+        _lidNotification = NativeMethods.RegisterPowerSettingNotification(
+            _window.Handle, NativeMethods.GuidLidSwitchState, NativeMethods.DeviceNotifyWindowHandle);
 
         _backlightSchedule.Start();
         _ = Task.Delay(DriverInventoryDelay).ContinueWith(
@@ -201,15 +212,22 @@ internal sealed class HelperApplicationContext : ApplicationContext
         PowerPlanHelper.SyncWithMode(HardwareSettings.PerformanceModeActive || HardwareSettings.HunterModeActive);
         // Частота встроенного экрана системой не запоминается.
         ScreenControl.Restore();
-        // Режим закрытой крышки живёт в схеме питания и сбрасывается вместе с ней.
-        if (HardwareSettings.ClamshellMode)
-            _ = PrivilegedHardware.TryRunClamshellTaskAsync(true, Elevation.Never);
+        // Режим закрытой крышки живёт в схеме питания и сбрасывается вместе с
+        // ней; заодно он снимается, если монитор или зарядку уже отключили.
+        ScheduleClamshellUpdate();
         // Службы HONOR останавливаются при входе сами: человек этого действия
         // не инициировал, поэтому окно UAC здесь недопустимо.
         _ = PrivilegedHardware.TryRunStopServicesTaskAsync(Elevation.Never);
         // Автозапуск прежних сборок жил в Run-ключе; он не умеет поднимать
         // приложение с правами без запроса UAC и переносится в задачу.
         StartupManager.MigrateLegacyRunEntry();
+        // Задача автозапуска могла остаться от прежней сборки: тогда она
+        // стартует только от сети и завершает приложение на батарее.
+        _ = StartupManager.SynchronizeAsync();
+        // Датчик отпечатка, отключённый при закрытой крышке, возвращается в
+        // строй при любом старте: приложение могли закрыть в этом состоянии.
+        if (HardwareSettings.FingerprintOffLid)
+            _ = SetFingerprintSensorAsync(false, Elevation.Never);
 
         _ = RefreshSensorsAsync();
     }
@@ -233,11 +251,23 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 NativeMethods.DestroyWindow(_tooltipHandle);
             Microsoft.Win32.SystemEvents.PowerModeChanged -= OnSystemPowerModeChanged;
             Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+            Microsoft.Win32.SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            Microsoft.Win32.SystemEvents.SessionEnding -= OnSessionEnding;
             if (_displayNotification != IntPtr.Zero)
             {
                 NativeMethods.UnregisterPowerSettingNotification(_displayNotification);
                 _displayNotification = IntPtr.Zero;
             }
+            if (_lidNotification != IntPtr.Zero)
+            {
+                NativeMethods.UnregisterPowerSettingNotification(_lidNotification);
+                _lidNotification = IntPtr.Zero;
+            }
+            _clamshellTimer.Dispose();
+            // Датчик отпечатка мог остаться отключённым при закрытой крышке:
+            // приложение закрывают и в этом состоянии.
+            if (HardwareSettings.FingerprintOffLid)
+                _ = PrivilegedHardware.TryRunFingerprintTaskAsync(false, Elevation.Never);
             if (_hidNotification != IntPtr.Zero)
             {
                 NativeMethods.UnregisterDeviceNotification(_hidNotification);
@@ -295,9 +325,23 @@ internal sealed class HelperApplicationContext : ApplicationContext
             () => SetClamshell(!HardwareSettings.ClamshellMode),
             @checked: HardwareSettings.ClamshellMode,
             tooltip: L.T(
-                "Ноутбук продолжает работу при закрытой крышке. Нужен подключённый внешний монитор.",
-                "The laptop keeps running with the lid closed. An external monitor must be connected.",
-                "合上盖子后笔记本继续工作，需要连接外接显示器。"));
+                "Ноутбук продолжает работу при закрытой крышке, пока подключён внешний монитор и есть питание от сети. Без них режим снимается сам.",
+                "The laptop keeps running with the lid closed while an external monitor and AC power are connected. Without them the mode is released.",
+                "连接外接显示器并使用电源适配器时，合盖后笔记本继续工作；否则自动取消。"));
+
+        if (FingerprintSensorControl.IsSupported())
+        {
+            menu.AddItem(
+                L.T("Отключать датчик отпечатка при закрытой крышке",
+                    "Turn off the fingerprint sensor with the lid closed",
+                    "合盖时关闭指纹传感器"),
+                ToggleFingerprintOffLid,
+                @checked: HardwareSettings.FingerprintOffLid,
+                tooltip: L.T(
+                    "Пока крышка закрыта, датчик отпечатка отключается и не будит ноутбук. При открытии включается обратно.",
+                    "The fingerprint sensor is switched off while the lid is closed and comes back when it opens.",
+                    "合盖期间关闭指纹传感器，开盖后恢复。"));
+        }
 
         menu.AddItem(
             L.T("Остановить службы HONOR", "Stop HONOR services", "停止 HONOR 服务"),
@@ -460,6 +504,106 @@ internal sealed class HelperApplicationContext : ApplicationContext
                 "Could not change the clamshell setting.",
                 "无法修改合盖模式。"),
             () => HardwareSettings.ClamshellMode = enabled);
+    }
+
+    /// <summary>
+    /// Крышку закрыли или открыли. Датчик отпечатка стоит на кнопке питания:
+    /// в закрытом ноутбуке он продолжает будить машину и участвовать во
+    /// входе, поэтому на время закрытой крышки устройство гасится.
+    /// </summary>
+    private void OnLidChanged(bool closed)
+    {
+        if (!HardwareSettings.FingerprintOffLid)
+            return;
+
+        AppLog.Info(closed
+            ? "Lid closed, turning off the fingerprint sensor"
+            : "Lid opened, turning the fingerprint sensor back on");
+        _ = SetFingerprintSensorAsync(closed, Elevation.Never);
+    }
+
+    private async Task SetFingerprintSensorAsync(bool disabled, Elevation elevation)
+    {
+        try
+        {
+            if (await PrivilegedHardware.TryRunFingerprintTaskAsync(disabled, elevation))
+                AppLog.Info(disabled ? "Fingerprint sensor turned off" : "Fingerprint sensor turned on");
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Could not switch the fingerprint sensor", exception);
+        }
+    }
+
+    /// <summary>
+    /// Пункт меню. Датчик приводится к открытой крышке в любом случае: после
+    /// включения и после выключения опции устройство должно работать.
+    /// </summary>
+    private void ToggleFingerprintOffLid()
+    {
+        HardwareSettings.FingerprintOffLid = !HardwareSettings.FingerprintOffLid;
+        _ = SetFingerprintSensorAsync(false, Elevation.UnlessDeclined);
+    }
+
+    /// <summary>
+    /// Режим закрытой крышки держится только при подключённом внешнем мониторе
+    /// и питании от сети; иначе ноутбук остался бы работать в сумке.
+    /// Пересмотр откладывается: смена конфигурации дисплея приходит пачкой.
+    /// </summary>
+    private void ScheduleClamshellUpdate()
+    {
+        _clamshellTimer.Stop();
+        _clamshellTimer.Start();
+    }
+
+    private async void OnClamshellTimerTick(object? sender, EventArgs eventArgs)
+    {
+        _clamshellTimer.Stop();
+        if (!HardwareSettings.ClamshellMode)
+            return;
+
+        bool ready;
+        try
+        {
+            ready = SystemInformation.PowerStatus.PowerLineStatus == PowerLineStatus.Online
+                && ScreenNative.IsExternalDisplayConnected();
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Could not check the clamshell conditions", exception);
+            return;
+        }
+
+        try
+        {
+            if (await PrivilegedHardware.TryRunClamshellTaskAsync(ready, Elevation.Never))
+                AppLog.Info(ready ? "Clamshell mode engaged" : "Clamshell mode released");
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Could not switch clamshell mode", exception);
+        }
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs eventArgs) => ScheduleClamshellUpdate();
+
+    /// <summary>
+    /// Завершение сеанса: датчик отпечатка возвращается в строй, иначе он
+    /// останется отключённым до следующего запуска приложения.
+    /// </summary>
+    private void OnSessionEnding(object sender, Microsoft.Win32.SessionEndingEventArgs eventArgs)
+    {
+        if (!HardwareSettings.FingerprintOffLid)
+            return;
+
+        try
+        {
+            PrivilegedHardware.TryRunFingerprintTaskAsync(false, Elevation.Never).Wait(TimeSpan.FromSeconds(5));
+        }
+        catch (Exception exception)
+        {
+            AppLog.Error("Could not turn the fingerprint sensor on at session end", exception);
+        }
     }
 
     // Службы HONOR при входе останавливаются сами; этот пункт нужен, если их
@@ -964,9 +1108,13 @@ internal sealed class HelperApplicationContext : ApplicationContext
             return;
         }
 
-        // Запитан ли ноутбук от сети, решает, какую частоту держать в автовыборе.
+        // Запитан ли ноутбук от сети, решает, какую частоту держать в автовыборе
+        // и держится ли режим закрытой крышки.
         if (eventArgs.Mode == Microsoft.Win32.PowerModes.StatusChange)
+        {
             ScreenControl.Restore();
+            ScheduleClamshellUpdate();
+        }
 
         if (eventArgs.Mode == Microsoft.Win32.PowerModes.Resume)
         {
@@ -1011,13 +1159,15 @@ internal sealed class HelperApplicationContext : ApplicationContext
         private readonly Action<string?> _onTooltip;
         private readonly Action _onDisplayResume;
         private readonly Action<string> _onDeviceChange;
+        private readonly Action<bool> _onLidChanged;
 
         internal MessageWindow(Action<string?> onTooltip,
-            Action onDisplayResume, Action<string> onDeviceChange)
+            Action onDisplayResume, Action<string> onDeviceChange, Action<bool> onLidChanged)
         {
             _onTooltip = onTooltip;
             _onDisplayResume = onDisplayResume;
             _onDeviceChange = onDeviceChange;
+            _onLidChanged = onLidChanged;
             CreateHandle(new CreateParams());
         }
 
@@ -1031,6 +1181,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
                     .PtrToStructure<NativeMethods.PowerBroadcastSetting>(message.LParam);
                 if (setting.PowerSetting == NativeMethods.GuidConsoleDisplayState && setting.Data == 1)
                     _onDisplayResume();
+                else if (setting.PowerSetting == NativeMethods.GuidLidSwitchState)
+                    _onLidChanged(setting.Data == 0);
                 base.WndProc(ref message);
                 return;
             }

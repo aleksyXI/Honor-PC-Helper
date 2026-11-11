@@ -2,10 +2,12 @@ name: Build
 
 on:
   push:
-    branches: [main]
+    # Любая ветка: сборка проверяет правки и там, где PR ещё не открыт.
+    branches: ['**']
     tags: ['v*']
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -27,6 +29,7 @@ jobs:
         with:
           name: HonorPCHelper
           path: dist/HonorPCHelper.exe
+          retention-days: 30
 
       # Описание релиза берётся из RELEASE_NOTES.md: файл лежит рядом с кодом,
       # правится в том же коммите и не зависит от того, как CI выгрузил тег.

@@ -173,6 +173,16 @@ internal static class PrivilegedHardware
     internal static Task<bool> TryRunClamshellTaskAsync(bool enabled, Elevation elevation = Elevation.Interactive)
         => Task.Run(() => TryRunTask(elevation, "--apply-clamshell", enabled.ToString()));
 
+    // Датчик отпечатка отключается устройством в диспетчере устройств: без
+    // повышенных прав команду взять неоткуда.
+    internal static Task<bool> TryRunFingerprintTaskAsync(bool disabled, Elevation elevation)
+        => Task.Run(() => TryRunTask(elevation, "--apply-fingerprint", disabled.ToString()));
+
+    // Задача автозапуска с наивысшими правами регистрируется только повышенным
+    // процессом, поэтому устаревшую задачу правит фоновая задача.
+    internal static Task<bool> TryRunStartupTaskAsync(Elevation elevation)
+        => Task.Run(() => TryRunTask(elevation, "--apply-startup-task", "1"));
+
     /// <summary>
     /// Службы HONOR останавливаются при входе в систему сами, а не по действию
     /// человека, - окно UAC там недопустимо, поэтому задача обязательна.
@@ -300,6 +310,12 @@ internal static class PrivilegedHardware
                 return true;
             case "--apply-clamshell" when bool.TryParse(value, out var clamshell):
                 ClamshellControl.SetEnabled(clamshell);
+                return true;
+            case "--apply-fingerprint" when bool.TryParse(value, out var fingerprintDisabled):
+                FingerprintSensorControl.SetDisabled(fingerprintDisabled);
+                return true;
+            case "--apply-startup-task":
+                StartupManager.RegisterCurrent();
                 return true;
             case "--apply-stop-services":
                 HonorServices.StopAll();

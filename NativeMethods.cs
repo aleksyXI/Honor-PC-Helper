@@ -51,6 +51,8 @@ internal static partial class NativeMethods
     internal const int PbtPowerSettingChange = 0x8013;
     internal const uint DeviceNotifyWindowHandle = 0x00000000;
     internal static readonly Guid GuidConsoleDisplayState = new("6fe69556-704a-47a0-8f24-c28d936fda47");
+    // Данные: 0 - крышка закрыта, 1 - открыта.
+    internal static readonly Guid GuidLidSwitchState = new("BA3E0F4D-B817-4094-A2D1-D56379E6A0F3");
 
     internal const int WmDeviceChange = 0x0219;
     internal const int DbtDeviceArrival = 0x8000;

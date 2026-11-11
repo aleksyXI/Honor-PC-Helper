@@ -45,6 +45,8 @@ internal static class Program
             "--set-camera-off" => Interactive(AlsoRegister(SetCameraOff), value),
             "--set-clamshell" => Interactive(AlsoRegister(SetClamshell), value),
             "--set-stop-services" => Interactive(AlsoRegister(StopServices), value),
+            "--set-fingerprint" => Interactive(AlsoRegister(SetFingerprint), value),
+            "--set-startup-task" => Interactive(AlsoRegister(SetStartupTask), value),
             "--read-sensors" => Interactive(AlsoRegister(ReadSensors), value),
 
             "--apply-battery-mode" => Silent(SetBatteryMode, value),
@@ -54,6 +56,8 @@ internal static class Program
             "--apply-camera-off" => Silent(SetCameraOff, value),
             "--apply-clamshell" => Silent(SetClamshell, value),
             "--apply-stop-services" => Silent(StopServices, value),
+            "--apply-fingerprint" => Silent(SetFingerprint, value),
+            "--apply-startup-task" => Silent(SetStartupTask, value),
 
             // Приходит и со значением (через фоновую задачу), и без него,
             // когда задача ещё не установлена и приложение поднимается через UAC.
@@ -221,6 +225,24 @@ internal static class Program
             return false;
 
         ClamshellControl.SetEnabled(enabled);
+        return true;
+    }
+
+    // Датчик отпечатка гасится на время, пока крышка закрыта.
+    private static bool SetFingerprint(string? value)
+    {
+        if (!bool.TryParse(value, out var disabled))
+            return false;
+
+        FingerprintSensorControl.SetDisabled(disabled);
+        return true;
+    }
+
+    // Перерегистрация задачи автозапуска на путь этого экземпляра: правит
+    // задачу, оставшуюся от прежней сборки или прежней папки.
+    private static bool SetStartupTask(string? _)
+    {
+        StartupManager.RegisterCurrent();
         return true;
     }
 
