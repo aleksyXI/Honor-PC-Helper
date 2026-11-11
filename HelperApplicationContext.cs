@@ -128,6 +128,8 @@ internal sealed class HelperApplicationContext : ApplicationContext
             _window.Handle, NativeMethods.GuidConsoleDisplayState, NativeMethods.DeviceNotifyWindowHandle);
         _lidNotification = NativeMethods.RegisterPowerSettingNotification(
             _window.Handle, NativeMethods.GuidLidSwitchState, NativeMethods.DeviceNotifyWindowHandle);
+        if (_lidNotification == IntPtr.Zero)
+            AppLog.Error("Could not subscribe to lid switch notifications");
 
         _backlightSchedule.Start();
         _ = Task.Delay(DriverInventoryDelay).ContinueWith(
