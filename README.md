@@ -52,7 +52,8 @@ edge gestures, driver and BIOS updates, self-update — is left untouched.
 | Menu item | Options | Effect |
 | --- | --- | --- |
 | **Display** | `{max} Hz`, `60 Hz`, `Auto: maximum on AC, 60 on battery` | Refresh rate of the built-in panel. Windows does not remember it: the chosen rate is restored after sleep and reboot, and in auto mode it follows the power source |
-| **Work with the lid closed** | On/off checkbox | The laptop keeps running with the lid closed (`LIDACTION` in the active power scheme). Can only be enabled with an external monitor connected |
+| **Work with the lid closed** | On/off checkbox | The laptop keeps running with the lid closed (`LIDACTION` in the active power scheme, AC only). The mode holds while an external monitor and AC power are connected, is released on its own when they are not, and the lid action that was set before is restored |
+| **Turn off the fingerprint sensor with the lid closed** | On/off checkbox | While the lid is closed the biometric sensor is switched off and no longer wakes the laptop; it comes back when the lid opens. Shown only on machines that have a sensor |
 | **Stop HONOR services** | — | Stops `OSDServer`, `MBAMainService` and `HnUpdateService` and disables their autostart. Done automatically at sign-in |
 
 Also in this build:
@@ -63,7 +64,8 @@ Also in this build:
 - **A HONOR-style on-screen plate instead of system notifications** (230×220, original PC Manager icons, DPI aware).
   It accompanies the mode, backlight level, camera and microphone keys, the touchpad key (firmware events `0x2A3`
   and `0x283`), the HONOR app key (`0x28A`), the refresh rate and a refused clamshell toggle.
-- **Autostart is a Task Scheduler task** (`HonorPCHelper Startup`, at logon, highest privileges), so the app starts
+- **Autostart is a Task Scheduler task** (`HonorPCHelper Startup`, at logon, highest privileges, no power conditions
+  and no 72-hour limit, re-registered on start when it was left behind by an older build or folder), so the app starts
   elevated without a UAC prompt. A leftover `HKCU\…\Run` entry or Startup-folder shortcut from older builds is
   migrated into the task and removed.
 
