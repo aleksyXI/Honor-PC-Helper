@@ -28,7 +28,13 @@ internal static class ClamshellControl
     private static extern uint PowerReadACValueIndex(nint root, Guid schemeGuid, Guid subgroupGuid, Guid settingGuid, out uint value);
 
     [DllImport("powrprof.dll")]
+    private static extern uint PowerReadDCValueIndex(nint root, Guid schemeGuid, Guid subgroupGuid, Guid settingGuid, out uint value);
+
+    [DllImport("powrprof.dll")]
     private static extern uint PowerWriteACValueIndex(nint root, Guid schemeGuid, Guid subgroupGuid, Guid settingGuid, uint value);
+
+    [DllImport("powrprof.dll")]
+    private static extern uint PowerWriteDCValueIndex(nint root, Guid schemeGuid, Guid subgroupGuid, Guid settingGuid, uint value);
 
     [DllImport("powrprof.dll", EntryPoint = "PowerSetActiveScheme", CharSet = CharSet.Unicode)]
     private static extern uint PowerSetActiveScheme(nint userPowerKey, ref Guid schemeGuid);
@@ -57,6 +63,15 @@ internal static class ClamshellControl
             : LidActionSleep;
     }
 
+    private static uint GetDcAction()
+    {
+        if (GetActiveScheme() is not { } active)
+            return LidActionSleep;
+        return PowerReadDCValueIndex(nint.Zero, active, ButtonSubgroup, LidActionSetting, out var value) == 0
+            ? value
+            : LidActionSleep;
+    }
+
     /// <summary>
     /// Действие, которое вернётся при снятии режима. Запоминается при первом
     /// включении; если человек ничего не выбирал, это сон.
@@ -73,16 +88,14 @@ internal static class ClamshellControl
     internal static void Enable()
     {
         var current = GetAcAction();
-        // В схеме уже "ничего не делать": это чужой выбор, восстанавливать его
-        // после снятия режима нечем, поэтому схема не трогается.
-        if (current == LidActionNothing)
-            return;
-
         if (HardwareSettings.ClamshellDefaultLidAction is null)
-            HardwareSettings.ClamshellDefaultLidAction = (int)current;
+            HardwareSettings.ClamshellDefaultLidAction = current is >= 1 and <= 3 ? (int)current : (int)LidActionSleep;
 
-        WriteAcAction(LidActionNothing);
+        if (current != LidActionNothing)
+            WriteAcAction(LidActionNothing);
+
         HardwareSettings.ClamshellEngaged = true;
+        RepairBatterySide();
     }
 
     /// <summary>
@@ -99,7 +112,28 @@ internal static class ClamshellControl
         if (GetAcAction() != restore)
             WriteAcAction(restore);
 
+        RepairBatterySide();
         HardwareSettings.ClamshellEngaged = false;
+    }
+
+    /// <summary>
+    /// Прежние сборки писали "ничего не делать" и в ветку от батареи, не
+    /// запоминая исходное действие. Такой ноутбук не засыпает с закрытой
+    /// крышкой ни от сети, ни от батареи - то есть работает в сумке.
+    /// Состояние переносится: режим считается включённым, возвращаемое
+    /// действие - сон, а ветка от батареи приводится в порядок при снятии.
+    /// </summary>
+    internal static void AdoptLegacyState()
+    {
+        if (!HardwareSettings.ClamshellMode
+            || HardwareSettings.ClamshellEngaged
+            || HardwareSettings.ClamshellDefaultLidAction is not null
+            || GetAcAction() != LidActionNothing)
+            return;
+
+        HardwareSettings.ClamshellDefaultLidAction = (int)LidActionSleep;
+        HardwareSettings.ClamshellEngaged = true;
+        AppLog.Info("Adopted the clamshell state left by an older build");
     }
 
     /// <summary>Точка входа команды --apply-clamshell.</summary>
@@ -109,6 +143,18 @@ internal static class ClamshellControl
             Enable();
         else
             Disable();
+    }
+
+    /// <summary>
+    /// Возвращает ветку "от батареи" к действию из настроек, если там осталось
+    /// "ничего не делать": от батареи ноутбук обязан засыпать.
+    /// </summary>
+    private static void RepairBatterySide()
+    {
+        if (GetDcAction() != LidActionNothing || GetActiveScheme() is not { } active)
+            return;
+        PowerWriteDCValueIndex(nint.Zero, active, ButtonSubgroup, LidActionSetting, RestoreAction);
+        PowerSetActiveScheme(nint.Zero, ref active);
     }
 
     private static void WriteAcAction(uint action)

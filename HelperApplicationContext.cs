@@ -214,6 +214,7 @@ internal sealed class HelperApplicationContext : ApplicationContext
         ScreenControl.Restore();
         // Режим закрытой крышки живёт в схеме питания и сбрасывается вместе с
         // ней; заодно он снимается, если монитор или зарядку уже отключили.
+        ClamshellControl.AdoptLegacyState();
         ScheduleClamshellUpdate();
         // Службы HONOR останавливаются при входе сами: человек этого действия
         // не инициировал, поэтому окно UAC здесь недопустимо.
